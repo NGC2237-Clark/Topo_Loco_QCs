@@ -281,8 +281,7 @@ class tb_floquet_pbc: # Tight-binding model of square lattice with Floquet drivi
             return H4
 
     def Hamiltonian_pbc_obc_onsite(self, delta = None):
-        '''The time-independent Hamiltonian H5 for 4T/5 <= t < T with open boundary conditions in the y direction
-                                                         and periodic boundary condition in the x direction'''
+        '''The time-independent Hamiltonian H5 for 4T/5 <= t < T '''
         H_onsite = np.zeros((self.nx * self.ny, self.nx * self.ny), dtype=complex)
         if delta is None:
             delta = self.delta_AB

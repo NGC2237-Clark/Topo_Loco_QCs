@@ -701,7 +701,7 @@ class tb_floquet_tbc_cuda:
             U_dagger = np.conjugate(U).T
             product = np.dot(U_dagger, U)
             identity = np.eye(self.nx * self.ny, dtype=np.cdouble)
-            is_unitary = np.allclose(product, identity)
+            is_unitary = np.allclose(product, identity, atol=1e-15)
             n += 1
         return U
     
