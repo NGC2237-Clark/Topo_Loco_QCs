@@ -457,15 +457,17 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
 
         if is_batch:
             batch_size = kx.shape[0]  # Total number of (kx, ky) pairs
-            kx = kx.reshape(-1)  # Flatten kx to 1D
-            # print(kx)
-            ky = ky.reshape(-1)  # Flatten ky to 1D
-            # print(ky)
-            if isinstance(t, torch.Tensor) and t.dim() > 0:
-                t = t.reshape(-1)
         else:
             batch_size = 1
 
+        # Handle scalar or tensor `t`
+        if isinstance(t, torch.Tensor) and t.dim() > 0:
+            batch_t = t.shape[0]  # Total number of time t
+            t = t.view(-1)
+        else:
+            batch_t = 1
+            t = torch.tensor([t], device=self.device, dtype=torch.float64)  # Convert scalar `t` to 1D tensor
+        
         # Reshape inputs for batch processing
         if isinstance(kx, torch.Tensor):
             kx = kx.view(batch_size, 1)
@@ -477,16 +479,14 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         else:
             ky = torch.full((batch_size, 1), ky, device=self.device)
 
-        if isinstance(t, torch.Tensor):
-            t = t.view(batch_size, 1)
-        else:
-            t = torch.full((batch_size, 1), t, device=self.device)
+        t = t.view(batch_t, 1)
+
         
         # Calculate dt based on the number of steps per segment
         dt = self.T / (5 * steps_per_segment)
         H_onsite = self.Hamiltonian_pbc_onsite(delta)
         # Broadcast H_onsite to match batch size (N_t, N_kx, N_ky, nx*ny, nx*ny)
-        H_onsite = H_onsite.unsqueeze(0).unsqueeze(1).unsqueeze(1).expand(batch_size, batch_size, batch_size, -1, -1)
+        H_onsite = H_onsite.unsqueeze(0).unsqueeze(1).unsqueeze(1).expand(batch_t, batch_size, batch_size, -1, -1)
         # print(H_onsite.shape)
         if not reverse:  # Anti-clockwise
             H1 = self.Hamiltonian_pbc1(ky, pbc).unsqueeze(1).expand(-1, batch_size,-1, -1)
@@ -499,13 +499,13 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             H3 = self.Hamiltonian_pbc4(kx, pbc).unsqueeze(0).expand(batch_size,-1, -1, -1)
             H4 = self.Hamiltonian_pbc3(ky, pbc).unsqueeze(1).expand(-1, batch_size,-1, -1)
         ## Adding the batch dimension for different time t so that the dimensions of H are (N_t, N_kx, N_ky, nx*ny, nx*ny)
-        H1 = H1.unsqueeze(0).expand(batch_size, -1, -1, -1, -1)
-        H2 = H2.unsqueeze(0).expand(batch_size, -1, -1, -1, -1)
-        H3 = H3.unsqueeze(0).expand(batch_size, -1, -1, -1, -1)
-        H4 = H4.unsqueeze(0).expand(batch_size, -1, -1, -1, -1)
+        H1 = H1.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
+        H2 = H2.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
+        H3 = H3.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
+        H4 = H4.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
         # print("H1", H1.shape)
-        identity = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_size, batch_size, batch_size, -1, -1)
-        U = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_size, batch_size, batch_size, -1, -1)
+        identity = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_t, batch_size, batch_size, -1, -1)
+        U = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_t, batch_size, batch_size, -1, -1)
         # print("U",U.shape)
         total_steps = torch.floor(t / dt).long()
         # print('total_steps',total_steps)
@@ -513,13 +513,15 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         for step in range(max_steps):
             current_t = step * dt
             active = step < total_steps
-            active = active.squeeze().unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1)
-            
-            mask1 = (current_t < self.T/5) & (step < total_steps) & active
-            mask2 = (current_t >= self.T/5) & (current_t < 2*self.T/5) & (step < total_steps) & active
-            mask3 = (current_t >= 2*self.T/5) & (current_t < 3*self.T/5) & (step < total_steps) & active
-            mask4 = (current_t >= 3*self.T/5) & (current_t < 4*self.T/5) & (step < total_steps) & active
-            mask5 = (current_t >= 4*self.T/5) & (step < total_steps) & active
+            # print(active.shape)
+            # active = active.squeeze().unsqueeze(1).unsqueeze(2).expand(-1, batch_size, batch_size)
+            active = active.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+            # print(active.shape)
+            mask1 = (current_t < self.T/5) &  active
+            mask2 = (current_t >= self.T/5) & (current_t < 2*self.T/5) & active
+            mask3 = (current_t >= 2*self.T/5) & (current_t < 3*self.T/5) & active
+            mask4 = (current_t >= 3*self.T/5) & (current_t < 4*self.T/5) & active
+            mask5 = (current_t >= 4*self.T/5) & active
             # print(step, active)
             H0 = torch.zeros_like(H1)
             Hr = torch.zeros_like(H1)
@@ -530,7 +532,8 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             Hr[mask5] = H0[mask5]
             combined_mask = mask1 | mask2 | mask3 | mask4 | mask5
             combined_mask = combined_mask.unsqueeze(3).unsqueeze(4).expand(-1, -1, -1, self.nx * self.ny, self.nx * self.ny)
-            print(combined_mask)
+            # print(combined_mask)
+            # print(combined_mask.shape)
             U_step = torch.where(combined_mask, \
                               self.infinitesimal_evol_operator(Hr, H_onsite, dt), identity)
             U = U_step @ U
@@ -543,11 +546,11 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         mask4 = (t >= 3*self.T/5) & (t < 4*self.T/5) & (remaining_time > 0)
         mask5 = (t >= 4*self.T/5) & (remaining_time > 0)
         
-        mask1 = mask1.squeeze().unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1)
-        mask2 = mask2.squeeze().unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1)
-        mask3 = mask3.squeeze().unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1)
-        mask4 = mask4.squeeze().unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1)
-        mask5 = mask5.squeeze().unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1)
+        mask1 = mask1.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+        mask2 = mask2.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+        mask3 = mask3.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+        mask4 = mask4.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+        mask5 = mask5.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
         H0 = torch.zeros_like(H1)
         Hr = torch.zeros_like(H1)
         Hr[mask1] = H1[mask1]
@@ -557,17 +560,14 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         Hr[mask5] = H0[mask5]
         combined_mask = mask1 | mask2 | mask3 | mask4 | mask5
         combined_mask = combined_mask.unsqueeze(3).unsqueeze(4).expand(-1, -1, -1, self.nx * self.ny, self.nx * self.ny)
-        print(combined_mask)
-        remaining_time = remaining_time.squeeze().unsqueeze(1).unsqueeze(2).unsqueeze(3).unsqueeze(4).expand(-1, batch_size, batch_size, self.nx * self.ny, self.nx * self.ny)
+        # print(combined_mask)
+        remaining_time = remaining_time.view(batch_t, 1, 1, 1, 1).expand(-1, batch_size, batch_size, self.nx * self.ny, self.nx * self.ny)
         U_step = torch.where(combined_mask, 
                              self.infinitesimal_evol_operator(Hr, H_onsite, remaining_time), 
                              identity)
         U = U_step @ U
-        
-        if is_batch:
-            return U
-        else:
-            return U.squeeze()
+        U = U.permute(1, 2, 0, 3, 4)
+        return U.squeeze()
     
     def quasienergy_eigenstates(self, k_num, steps_per_segment, delta=None, reverse=False, plot=False, save_path=None, pbc='x'):
         '''The quasi-energy spectrum U(kx, T) for the edge properties'''
@@ -655,11 +655,20 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
     ## The following functions 
     def eigen_grid(self, N_div, steps_per_segment, delta=None, reverse=False, plot=False, save_path=None, pbc='xy'):
         '''The eigenvalues and eigenvectors on the grid of the quasienergy spectrum'''
-        k_x = torch.linspace(0, 2*torch.pi/self.a, N_div, device=self.device)
-        k_y = torch.linspace(0, 2*torch.pi/self.a, N_div, device=self.device)
+        k_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
+        k_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
         t = torch.linspace(0, self.T, N_div, device=self.device)
+        # Remove the first element (0) from each tensor: see the numerical approx of the W3
+        k_x = k_x[1:]
+        k_y = k_y[1:]
+        t = t[1:]
+        ## The eigenvalues and eigenvectors on the grid of the quasienergy spectrum
+        ## The dimension of the eigenvalues_matrix is (N_kx, N_ky, N_t, nx*ny)
+        ## The dimension of the wf_matrix is (N_kx, N_ky, N_t, nx*ny, nx*ny)
+        U_tensor = self.time_evolution_operator_pbc1(t, steps_per_segment, k_x, k_y, pbc, delta, reverse)
+        eigvals, eigvecs = torch.linalg.eig(U_tensor)
+        return eigvals, eigvecs
         
-    
     
     
     
