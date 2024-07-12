@@ -60,6 +60,7 @@ class tb_floquet_tbc_cuda:
                     # If it's not a tensor or not on the correct device, properly convert it
                     theta_y_tensor1 = torch.tensor(theta_y, dtype=torch.float, device=self.device)
                 H1[int(a), int(b)] = -J_coe_tensor * torch.exp(1j * theta_y_tensor1)
+                # print(int(a), int(b), H1[int(a), int(b)])
                 H1[int(b), int(a)] = -J_coe_tensor * torch.exp(-1j * theta_y_tensor1)
                 p += 1
         return H1
@@ -423,10 +424,15 @@ class tb_floquet_tbc_cuda:
         n is the order of expansion of the time evolution operator'''
         H_onsite = self.Hamiltonian_onsite(vd, rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
         H1 = self.Hamiltonian_tbc1(theta_y, tbc) + H_onsite
+        # print("H1", H1)
         H2 = self.Hamiltonian_tbc2(theta_x, tbc) + H_onsite
+        # print("H2", H2)
         H3 = self.Hamiltonian_tbc3(theta_y, tbc) + H_onsite
+        # print("H3", H3)
         H4 = self.Hamiltonian_tbc4(theta_x, tbc) + H_onsite
+        # print("H4", H4)
         H5 = H_onsite
+        # print("H5", H5)
 
         if t < self.T/5:
             U = torch.matrix_exp(-1j * t * H1)
@@ -587,52 +593,92 @@ class tb_floquet_tbc_cuda:
     ## Function 3. Disordered-averaged transmission probability --COMPLETED
     ## Function 4. The Inverse Participation Ratios
 
-    def quasienergies_states_edge(self, vd, rotation_angle, theta_x_num, a=0, b=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
+    def quasienergies_states_edge(self, vd, rotation_angle, theta_num, tbc='x', a=0, b=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
         '''The quasi-energy spectrum for the edge U(kx, T) properties'''
         '''The output should be the quasienergies which are the diagonal elements of the effective Hamiltonian after diagonalisation. This is an intermeidate step towards the 'deformed' time-periodic evolution operator '''
-        theta_x = torch.linspace(0, 2 * torch.pi, theta_x_num, device=self.device)
-        eigenvalues_matrix = torch.zeros((theta_x_num, self.nx * self.ny), device=self.device)
-        wf_matrix = torch.zeros((theta_x_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        theta_x = torch.linspace(0, 2 * torch.pi, theta_num, device=self.device)
+        theta_y = torch.linspace(0, 2 * torch.pi, theta_num, device=self.device)
+        eigenvalues_matrix = torch.zeros((theta_num, self.nx * self.ny), device=self.device)
+        wf_matrix = torch.zeros((theta_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        if tbc == 'x':
+            for i_index, i in enumerate(theta_x):
+                U = self.time_evolution_operator(self.T, 'x', vd, rotation_angle, theta_x=i, a=a, b=b, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
+                eigvals, eigvecs = torch.linalg.eig(U)
+                E_T = torch.log(eigvals) / (1j * self.T)
+                E_T, idx = E_T.cpu().real.sort()  # Move to CPU for sorting
+                idx = idx.to(self.device)  # Move indices back to GPU
+                E_T = E_T.to(self.device)  # Move sorted quasienergies back to GPU
+                eigvecs = eigvecs[:, idx]  # Sort eigenvectors on GPU
+                eigenvalues_matrix[i_index] = E_T
+                wf_matrix[i_index] = eigvecs
 
-        for i_index, i in enumerate(theta_x):
-            U = self.time_evolution_operator(self.T, 'x', vd, rotation_angle, theta_x=i, a=a, b=b, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
-            eigvals, eigvecs = torch.linalg.eig(U)
-            E_T = torch.log(eigvals) / (1j * self.T)
-            E_T, idx = E_T.cpu().real.sort()  # Move to CPU for sorting
-            idx = idx.to(self.device)  # Move indices back to GPU
-            E_T = E_T.to(self.device)  # Move sorted quasienergies back to GPU
-            eigvecs = eigvecs[:, idx]  # Sort eigenvectors on GPU
-            eigenvalues_matrix[i_index] = E_T
-            wf_matrix[i_index] = eigvecs
+            if plot:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                tick_label_fontsize = 32  # Set font size for tick labels
+                label_fontsize = 34      # Set font size for the axis labels
 
-        if plot:
-            fig, ax = plt.subplots(figsize=(12, 8))
-            tick_label_fontsize = 32  # Set font size for tick labels
-            label_fontsize = 34      # Set font size for the axis labels
+                ax.tick_params(axis='x', labelsize=tick_label_fontsize)
+                ax.tick_params(axis='y', labelsize=tick_label_fontsize)
 
-            ax.tick_params(axis='x', labelsize=tick_label_fontsize)
-            ax.tick_params(axis='y', labelsize=tick_label_fontsize)
+                theta_x_cpu = theta_x.cpu().numpy()  # Transfer theta_x to CPU and convert to NumPy for plotting
+                eigenvalues_matrix_cpu = eigenvalues_matrix.cpu().numpy()  # Transfer eigenvalues_matrix to CPU and convert to NumPy for plotting
+                
+                ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
+                ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
+                
+                for i in range(theta_num):
+                    # Plot each point; here, we use numpy broadcasting to repeat theta_x[i] across the corresponding eigenvalues
+                    ax.scatter([theta_x_cpu[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix_cpu[i], c='b', s=0.1)
 
-            theta_x_cpu = theta_x.cpu().numpy()  # Transfer theta_x to CPU and convert to NumPy for plotting
-            eigenvalues_matrix_cpu = eigenvalues_matrix.cpu().numpy()  # Transfer eigenvalues_matrix to CPU and convert to NumPy for plotting
-            
-            ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
-            ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
-            
-            for i in range(theta_x_num):
-                # Plot each point; here, we use numpy broadcasting to repeat theta_x[i] across the corresponding eigenvalues
-                ax.scatter([theta_x_cpu[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix_cpu[i], c='b', s=0.1)
+                ax.set_xlabel(r'$\theta_{x}$', fontsize=label_fontsize)
+                ax.set_ylabel('Quasienergy', fontsize=label_fontsize)
+                ax.set_xlim(0, 2 * np.pi)
+                ax.set_ylim(-np.pi / self.T, np.pi / self.T)
 
-            ax.set_xlabel(r'$\theta_{x}$', fontsize=label_fontsize)
-            ax.set_ylabel('Quasienergy', fontsize=label_fontsize)
-            ax.set_xlim(0, 2 * np.pi)
-            ax.set_ylim(-np.pi / self.T, np.pi / self.T)
+                if save_path:
+                    plt.tight_layout()
+                    fig.savefig(save_path, format='pdf', bbox_inches='tight')  # Save with tight bounding box.
 
-            if save_path:
-                plt.tight_layout()
-                fig.savefig(save_path, format='pdf', bbox_inches='tight')  # Save with tight bounding box.
+                plt.show()
+        elif tbc == 'y':
+            for i_index, i in enumerate(theta_y):
+                U = self.time_evolution_operator(self.T, 'y', vd, rotation_angle, theta_y=i, a=a, b=b, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
+                eigvals, eigvecs = torch.linalg.eig(U)
+                E_T = torch.log(eigvals) / (1j * self.T)
+                E_T, idx = E_T.cpu().real.sort()  # Move to CPU for sorting
+                idx = idx.to(self.device)  # Move indices back to GPU
+                E_T = E_T.to(self.device)  # Move sorted quasienergies back to GPU
+                eigvecs = eigvecs[:, idx]  # Sort eigenvectors on GPU
+                eigenvalues_matrix[i_index] = E_T
+                wf_matrix[i_index] = eigvecs
 
-            plt.show()
+            if plot:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                tick_label_fontsize = 32  # Set font size for tick labels
+                label_fontsize = 34      # Set font size for the axis labels
+
+                ax.tick_params(axis='x', labelsize=tick_label_fontsize)
+                ax.tick_params(axis='y', labelsize=tick_label_fontsize)
+
+                theta_y_cpu = theta_y.cpu().numpy()  # Transfer theta_x to CPU and convert to NumPy for plotting
+                eigenvalues_matrix_cpu = eigenvalues_matrix.cpu().numpy()  # Transfer eigenvalues_matrix to CPU and convert to NumPy for plotting
+                
+                ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
+                ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
+                
+                for i in range(theta_num):
+                    # Plot each point; here, we use numpy broadcasting to repeat theta_x[i] across the corresponding eigenvalues
+                    ax.scatter([theta_y_cpu[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix_cpu[i], c='b', s=0.1)
+
+                ax.set_xlabel(r'$\theta_{y}$', fontsize=label_fontsize)
+                ax.set_ylabel('Quasienergy', fontsize=label_fontsize)
+                ax.set_xlim(0, 2 * np.pi)
+                ax.set_ylim(-np.pi / self.T, np.pi / self.T)
+
+                if save_path:
+                    plt.tight_layout()
+                    fig.savefig(save_path, format='pdf', bbox_inches='tight')  # Save with tight bounding box.
+                plt.show()
         return eigenvalues_matrix, wf_matrix
     
     # def time_evolution_Nperiod(self, N_times, tbc, vd, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, delta=None, initialise=False, fully_disorder=True):

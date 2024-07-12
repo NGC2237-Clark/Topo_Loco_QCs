@@ -282,17 +282,21 @@ class tb_floquet_pbc: # Tight-binding model of square lattice with Floquet drivi
 
     def Hamiltonian_pbc_obc_onsite(self, delta = None):
         '''The time-independent Hamiltonian H5 for 4T/5 <= t < T '''
-        H_onsite = np.zeros((self.nx * self.ny, self.nx * self.ny), dtype=complex)
+        size = self.nx * self.ny
+        H_onsite = np.zeros((size, size), dtype=complex)  # Use complex dtype
         if delta is None:
             delta = self.delta_AB
-        i = 0
-        n = 0
-        while i < self.nx * self.ny:
-            if i == n * self.nx:
-                n += 1
-                delta *= -1
-            H_onsite[i, i] = delta * (-1) ** (i + 1)
-            i += 1
+        deltas = np.full((size,), delta, dtype=complex)  # Create a full array of delta values
+        deltas[1::2] *= -1  # Alternate the sign starting from the second element
+
+        # Adjust the sign based on row blocks
+        for n in range(self.ny):
+            if n % 2 == 1:
+                start_idx = n * self.nx
+                end_idx = start_idx + self.nx
+                deltas[start_idx:end_idx] *= -1
+        # print(deltas)
+        np.fill_diagonal(H_onsite, deltas)  # Fill the diagonal with the modified deltas
         return H_onsite
 
     def Hamiltonian_pbc_obc(self, t, kx, ky, delta = None, reverse = False, pbc = 'x'):
@@ -332,11 +336,17 @@ class tb_floquet_pbc: # Tight-binding model of square lattice with Floquet drivi
             H4 = self.Hamiltonian_pbc_obc3(ky, pbc) + H_onsite
             H5 = H_onsite
         else:
+            # print("ky", ky)
             H1 = self.Hamiltonian_pbc_obc1(ky, pbc) + H_onsite
+            # print("H1", H1)
             H2 = self.Hamiltonian_pbc_obc2(kx, pbc) + H_onsite
+            # print("H2", H2)
             H3 = self.Hamiltonian_pbc_obc3(ky, pbc) + H_onsite
+            # print("H3", H3)
             H4 = self.Hamiltonian_pbc_obc4(kx, pbc) + H_onsite
+            # print("H4", H4)
             H5 = H_onsite
+            # print("H5", H5)
         is_unitary = False
         while is_unitary == False:
             if t < self.T/5:
@@ -440,6 +450,42 @@ class tb_floquet_pbc: # Tight-binding model of square lattice with Floquet drivi
                     plt.tight_layout()
                     fig.savefig(save_path, format='pdf', bbox_inches='tight')  # Save with tight bounding box.
                 plt.show()
+                
+        elif pbc == 'y':
+            eigenvalues_matrix = np.zeros((k_num, self.nx * self.ny), dtype=float)
+            wf_matrix = np.zeros((k_num, self.nx * self.ny, self.nx * self.ny), dtype=complex)
+            for index_i, i in enumerate(k_y):
+                U = self.time_evolution_operator_pbc_obc(self.T, n, 0, i, 'y', delta, reverse)
+                eigvals, eigvecs = np.linalg.eig(U)
+                E_T = 1j * np.log(eigvals) / self.T
+                # Sort the quasienergies
+                idx = E_T.argsort()
+                E_T = E_T[idx]
+                eigvecs = eigvecs[:, idx]
+                #### form the tensors of the eigenvalues and eigenvectors
+                eigenvalues_matrix[index_i] = E_T.real
+                wf_matrix[index_i] = eigvecs
+            if plot:
+                fig, ax = plt.subplots(figsize=(8, 8))
+                # Set the font size for the tick labels on the axes and the axis labels
+                tick_label_fontsize = 32
+                label_fontsize = 34
+                ax.tick_params(axis='x', labelsize=tick_label_fontsize)
+                ax.tick_params(axis='y', labelsize=tick_label_fontsize)
+                ## Set the x-axis ticks
+                ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
+                ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
+                for i in range(k_num):
+                    ax.scatter([k_y[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix[i, :], color='black', s=0.1)
+                ax.set_xlabel(r'$k_{y}$', fontsize=label_fontsize)
+                # ax.set_ylabel('Quasienergy', fontsize=label_fontsize)
+                #ax.set_title('Energy Spectrum of Haldane Ribbon with Zigzag Termination')
+                ax.set_xlim(0, 2*np.pi/self.a)
+                ax.set_ylim(-np.pi/self.T, np.pi/self.T)
+                if save_path:
+                    plt.tight_layout()
+                    fig.savefig(save_path, format='pdf', bbox_inches='tight')
+                plt.show()
         if pbc == "xy":
             eigenvalues_matrix = np.zeros((k_num, k_num, self.nx * self.ny), dtype=float)
             wf_matrix = np.zeros((k_num, k_num, self.nx * self.ny, self.nx * self.ny), dtype=complex)
@@ -458,7 +504,7 @@ class tb_floquet_pbc: # Tight-binding model of square lattice with Floquet drivi
             if plot:
                 fig = plt.figure()
                 ax = fig.add_subplot(111, projection='3d')
-                X, Y = np.meshgrid(k_x, k_y)
+                X, Y = np.meshgrid(k_x, k_y, indexing='ij')
                 # Set the font size for the tick labels on the axes and the axis labels
                 tick_label_fontsize = 22
                 label_fontsize = 15

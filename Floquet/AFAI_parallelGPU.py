@@ -11,6 +11,7 @@ import multiprocessing
 from multiprocessing import Pool
 from torch import nn
 from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.animation as animation
 
 class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice with Floquet driving and periodic boundary conditions
     def __init__(self, period, lattice_constant, J_coe, num_y, num_x = 2, device=None):
@@ -22,16 +23,16 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         self.a = lattice_constant
         self.J_coe = J_coe # hopping matrix element
         self.delta_AB = np.pi/(2* self.T)
-        
         # Check if device is manually set or based on GPU availability
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
-
+        self.sigma_plus = torch.tensor([[0, 1], [0, 0]], dtype=torch.cdouble, device=self.device)
+        self.sigma_minus = torch.tensor([[0, 0], [1, 0]], dtype=torch.cdouble, device=self.device)
         # Move the model to the designated device
         self.to(self.device)
-
+        
         # Check if multiple GPUs are available and wrap the model with DataParallel
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             self = nn.DataParallel(self)
@@ -42,19 +43,20 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             ky = torch.tensor([ky], device=self.device)
         elif not isinstance(ky, torch.Tensor):
             ky = torch.tensor(ky, device=self.device)
-            
+        else:
+            ky = ky.to(self.device)
         is_batch = ky.dim() > 1 or (ky.dim() == 1 and ky.shape[0] > 1)
         batch_size = ky.shape[0] if is_batch else 1
         ky = ky.view(batch_size, 1, 1)
-
-        H1 = torch.zeros((batch_size, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        size = self.nx * self.ny
+        H1 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
 
         if self.nx % 2 == 1:  # odd nx
-            for i in range(self.nx * self.ny):
+            for i in range(size):
                 a = 2 * i
                 b = self.nx + 2 * i
-                if b < self.nx * self.ny:
+                if b < size:
                     H1[:, a, b] = -J_coe_tensor
                     H1[:, b, a] = -J_coe_tensor.conj()
         else:  # Even nx
@@ -65,11 +67,14 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                 based_pairs[j] = based_pairs[j-1] + increment
 
             for a, b in based_pairs:
-                while a < self.nx * self.ny and b < self.nx * self.ny:
+                while a < size and b < size:
                     H1[:, int(a), int(b)] = -J_coe_tensor
                     H1[:, int(b), int(a)] = -J_coe_tensor.conj()
                     a += 2 * self.nx
                     b += 2 * self.nx
+        phase = torch.exp(1j * ky * self.a).squeeze()
+        # print(phase.shape)
+        device = phase.device  # Use the device of the phase tensor
 
         # For the periodic boundary in the y direction
         if pbc == 'y' or pbc == 'xy':
@@ -77,13 +82,19 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             while 1 + 2 * p < self.nx and self.ny % 2 == 0:
                 a = 1 + self.nx * (self.ny - 1) + 2 * p
                 b = 1 + 2 * p
-                phase = torch.exp(1j * ky * self.a)
-                phase = phase.squeeze()
                 H1[:, int(a), int(b)] = -J_coe_tensor * phase
                 H1[:, int(b), int(a)] = -J_coe_tensor * phase.conj()
                 p += 1
-
-        return H1.squeeze(0) if not is_batch else H1
+        if size == 2:
+            sigma_plus = self.sigma_plus.to(device)
+            sigma_minus = self.sigma_minus.to(device)
+            # Expand sigma_plus and sigma_minus to match the batch size
+            sigma_plus = sigma_plus.unsqueeze(0).expand(batch_size, -1, -1)
+            sigma_minus = sigma_minus.unsqueeze(0).expand(batch_size, -1, -1)
+            # print(sigma_plus.shape)
+            phase = phase.unsqueeze(1).unsqueeze(2).expand(-1, 2, 2)
+            H1 = self.sigma_plus * (-J_coe_tensor) * phase + self.sigma_minus * (-J_coe_tensor) * phase.conj()
+        return H1.squeeze() if not is_batch else H1
 
     def Hamiltonian_pbc2(self, kx, pbc='x'):
         '''The time-independent Hamiltonian H2 for T/5 <= t < 2T/5 with periodic boundary conditions in either x, y, or both x and y directions'''
@@ -91,18 +102,19 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             kx = torch.tensor([kx], device=self.device)
         elif not isinstance(kx, torch.Tensor):
             kx = torch.tensor(kx, device=self.device)
-        
+        else:
+            kx = kx.to(self.device)
         is_batch = kx.dim() > 1 or (kx.dim() == 1 and kx.shape[0] > 1)
         batch_size = kx.shape[0] if is_batch else 1
         kx = kx.view(batch_size, 1, 1)
-
-        H2 = torch.zeros((batch_size, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        size = self.nx * self.ny
+        H2 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
 
         n = 1
         a = -1
         b = 0
-        while n <= self.ny and a < self.nx * self.ny - 1 and b < self.nx * self.ny:
+        while n <= self.ny and a < size - 1 and b < size:
             a += 2
             b += 2
             if b < n * self.nx:
@@ -119,7 +131,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                 elif self.nx % 2 == 0:
                     a += 1
                     b += 1
-                if a < self.nx * self.ny - 1 and b < self.nx * self.ny:
+                if a < size - 1 and b < size:
                     H2[:, a, b] = -J_coe_tensor
                     H2[:, b, a] = -J_coe_tensor.conj()
             if self.nx == 2:
@@ -127,19 +139,25 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                 b += 1
             if b >= self.ny * self.nx - 2:
                 break
-
+        phase = torch.exp(1j * kx * self.a).squeeze()
+        device = phase.device  # Use the device of the phase tensor
         # For the periodic boundary in the x direction
         if pbc == 'x' or pbc == 'xy':
             p = 0
-            while self.nx - 1 + 2 * self.nx * p < self.nx * self.ny and self.nx % 2 == 0:
+            while self.nx - 1 + 2 * self.nx * p < size and self.nx % 2 == 0:
                 a = self.nx - 1 + 2 * self.nx * p
                 b = 2 * self.nx * p
-                phase = torch.exp(1j * kx * self.a)
-                phase = phase.squeeze()
                 H2[:, a, b] = -J_coe_tensor * phase
                 H2[:, b, a] = -J_coe_tensor * phase.conj()
                 p += 1
-
+        if size == 2:
+            sigma_plus = self.sigma_plus.to(device)
+            sigma_minus = self.sigma_minus.to(device)
+            # Expand sigma_plus and sigma_minus to match the batch size
+            sigma_plus = sigma_plus.unsqueeze(0).expand(batch_size, -1, -1)
+            sigma_minus = sigma_minus.unsqueeze(0).expand(batch_size, -1, -1)
+            phase = phase.unsqueeze(1).unsqueeze(2).expand(-1, 2, 2)
+            H2 = self.sigma_plus * (-J_coe_tensor) * phase + self.sigma_minus * (-J_coe_tensor) * phase.conj()
         return H2.squeeze() if not is_batch else H2
 
     def Hamiltonian_pbc3(self, ky, pbc='y'):
@@ -148,29 +166,30 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             ky = torch.tensor([ky], device=self.device)
         elif not isinstance(ky, torch.Tensor):
             ky = torch.tensor(ky, device=self.device)
-        
+        else:
+            ky = ky.to(self.device)
         is_batch = ky.dim() > 1 or (ky.dim() == 1 and ky.shape[0] > 1)
         batch_size = ky.shape[0] if is_batch else 1
         ky = ky.view(batch_size, 1, 1)
-
-        H3 = torch.zeros((batch_size, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        size = self.nx * self.ny
+        H3 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
 
         if self.nx % 2 == 1:  # odd nx
-            for i in range(self.nx * self.ny):
+            for i in range(size):
                 a = 2 * i + 1
                 b = self.nx + 2 * i + 1
-                if b < self.nx * self.ny:
+                if b < size:
                     H3[:, a, b] = -J_coe_tensor
                     H3[:, b, a] = -J_coe_tensor.conj()
         else:  # Even nx
             n = 1
             a = 1
             b = 1 + self.nx
-            if b < self.nx * self.ny:
+            if b < size:
                 H3[:, a, b] = -J_coe_tensor
                 H3[:, b, a] = -J_coe_tensor.conj()
-            while n < self.ny and a < self.nx * self.ny - 1 and b < self.nx * self.ny - 1:
+            while n < self.ny and a < size - 1 and b < size - 1:
                 a += 2
                 b += 2
                 if a < n * self.nx:
@@ -181,7 +200,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                     if n % 2 == 0:  # even n
                         a -= 1
                         b -= 1
-                    elif n % 2 != 0 and b < self.nx * self.ny - 1:  # odd n
+                    elif n % 2 != 0 and b < size - 1:  # odd n
                         a += 1
                         b += 1
                     else:
@@ -189,7 +208,8 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                         b -= 2
                     H3[:, a, b] = -J_coe_tensor
                     H3[:, b, a] = -J_coe_tensor.conj()
-
+        phase = torch.exp(1j * ky * self.a).squeeze()
+        device = phase.device  # Use the device of the phase tensor
         # For the periodic boundary in the y direction
         if pbc == 'y' or pbc == 'xy':
             p = 0
@@ -201,7 +221,14 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                 H3[:, int(a), int(b)] = -J_coe_tensor * phase
                 H3[:, int(b), int(a)] = -J_coe_tensor * phase.conj()
                 p += 1
-
+        if size == 2:
+            sigma_plus = self.sigma_plus.to(device)
+            sigma_minus = self.sigma_minus.to(device)
+            # Expand sigma_plus and sigma_minus to match the batch size
+            sigma_plus = sigma_plus.unsqueeze(0).expand(batch_size, -1, -1)
+            sigma_minus = sigma_minus.unsqueeze(0).expand(batch_size, -1, -1)
+            phase = phase.unsqueeze(1).unsqueeze(2).expand(-1, 2, 2)
+            H3 = self.sigma_minus * (-J_coe_tensor) * phase + self.sigma_plus * (-J_coe_tensor) * phase.conj()
         return H3.squeeze(0) if not is_batch else H3
 
     def Hamiltonian_pbc4(self, kx, pbc='x'):
@@ -210,21 +237,22 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             kx = torch.tensor([kx], device=self.device)
         elif not isinstance(kx, torch.Tensor):
             kx = torch.tensor(kx, device=self.device)
-        
+        else:
+            kx = kx.to(self.device)
         is_batch = kx.dim() > 1 or (kx.dim() == 1 and kx.shape[0] > 1)
         # print(is_batch)
         # print(kx.dim())
         # print(kx.shape[0])
         batch_size = kx.shape[0] if is_batch else 1
         kx = kx.view(batch_size, 1, 1)
-        # print(kx)
-        H4 = torch.zeros((batch_size, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        size = self.nx * self.ny
+        H4 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
 
         n = 1
         a = -2
         b = -1
-        while n <= self.ny and a < self.nx * self.ny - 2 and b < self.nx * self.ny - 2:
+        while n <= self.ny and a < size - 2 and b < size - 2:
             a += 2
             b += 2
             if b < n * self.nx:
@@ -235,7 +263,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                 if self.nx % 2 == 0 and self.nx != 2:  # even nx
                     a += 1
                     b += 1
-                elif self.nx % 2 == 0 and self.nx == 2 and b < self.nx * self.ny - 2:  # even nx and nx = 2
+                elif self.nx % 2 == 0 and self.nx == 2 and b < size - 2:  # even nx and nx = 2
                     a += 2
                     b += 2
                     n += 1
@@ -251,40 +279,50 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                     b += -2
                 H4[:, a, b] = -J_coe_tensor
                 H4[:, b, a] = -J_coe_tensor.conj()
-
+        phase = torch.exp(1j * kx * self.a).squeeze()
+        device = phase.device  # Use the device of the phase tensor
         # For the periodic boundary in the x direction
         if pbc == 'x' or pbc == 'xy':
             p = 0
-            while 2 * self.nx * (1 + p) - 1 < self.nx * self.ny and self.nx % 2 == 0:
+            while 2 * self.nx * (1 + p) - 1 < size and self.nx % 2 == 0:
                 a = 2 * self.nx * (1 + p) - 1
                 # print(a)
                 b = 2 * self.nx * p + self.nx
                 # print(b)
-                phase = torch.exp(1j * kx * self.a)
-                # print(phase)
-                phase = phase.squeeze()
                 # print(phase)
                 H4[:, a, b] = -J_coe_tensor * phase
                 H4[:, b, a] = -J_coe_tensor * phase.conj()
                 p += 1
-
+        if size == 2:
+            H4 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
+            sigma_plus = self.sigma_plus.to(device)
+            sigma_minus = self.sigma_minus.to(device)
+            # Expand sigma_plus and sigma_minus to match the batch size
+            sigma_plus = sigma_plus.unsqueeze(0).expand(batch_size, -1, -1)
+            sigma_minus = sigma_minus.unsqueeze(0).expand(batch_size, -1, -1)
+            phase = phase.unsqueeze(1).unsqueeze(2).expand(-1, 2, 2)
+            H4 = self.sigma_minus * (-J_coe_tensor) * phase + self.sigma_plus * (-J_coe_tensor) * phase.conj()
         return H4.squeeze() if not is_batch else H4
 
     def Hamiltonian_pbc_onsite(self, delta=None):
         '''The time-independent Hamiltonian H5 for 4T/5 <= t < T with any boundary conditions'''
+        size = self.nx * self.ny
+        H_onsite = torch.zeros((size, size), dtype=torch.cdouble, device=self.device)
+
         if delta is None:
             delta = self.delta_AB
-        delta = torch.tensor(delta, dtype=torch.cdouble, device=self.device)
-        
-        H_onsite = torch.zeros((self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
-        i = 0
-        n = 0
-        while i < self.nx * self.ny:
-            if i == n * self.nx:
-                n += 1
-                delta *= -1
-            H_onsite[i, i] = delta * (-1) ** (i + 1)
-            i += 1
+
+        deltas = torch.full((size,), delta, dtype=torch.cdouble, device=self.device)
+        deltas[1::2] *= -1  # Alternate the sign starting from the second element
+
+        # Adjust the sign based on row blocks
+        for n in range(self.ny):
+            if n % 2 == 1:
+                start_idx = n * self.nx
+                end_idx = start_idx + self.nx
+                deltas[start_idx:end_idx] *= -1
+
+        H_onsite[torch.arange(size), torch.arange(size)] = deltas
         return H_onsite
 
     def Hamiltonian_pbc(self, t, kx, ky, delta=None, reverse=False, pbc='x'):
@@ -385,64 +423,6 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         U = torch.matrix_exp(-1j * (Hr) * dt/2) @ torch.matrix_exp(-1j * (V_dis) * dt) @ torch.matrix_exp(-1j * (Hr) * dt/2)
         return U
     
-    # def time_evolution_operator_pbc1(self, t, steps_per_segment, kx, ky, pbc, delta = None, reverse=False):
-    #     '''Time evolution operator for time t ≤ T with a specified number of steps per T/5 segment'''
-        
-    #     if delta is None:
-    #         delta = self.delta_AB
-        
-    #     # Calculate dt based on the number of steps per segment
-    #     dt = self.T / (5 * steps_per_segment)
-
-    #     H_onsite = self.Hamiltonian_pbc_onsite(delta)
-    #     if not reverse:  # Anti-clockwise
-    #         H1 = self.Hamiltonian_pbc1(ky, pbc)
-    #         H2 = self.Hamiltonian_pbc2(kx, pbc)
-    #         H3 = self.Hamiltonian_pbc3(ky, pbc)
-    #         H4 = self.Hamiltonian_pbc4(kx, pbc)
-    #     else:  # Clockwise
-    #         H1 = self.Hamiltonian_pbc2(kx, pbc)
-    #         H2 = self.Hamiltonian_pbc1(ky, pbc)
-    #         H3 = self.Hamiltonian_pbc4(kx, pbc)
-    #         H4 = self.Hamiltonian_pbc3(ky, pbc)
-        
-    #     U = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device)
-    #     total_steps = int(t / dt)
-        
-    #     for step in range(total_steps):
-    #         current_t = step * dt
-    #         if current_t < self.T/5:
-    #             Hr = H1
-    #         elif current_t < 2*self.T/5:
-    #             Hr = H2
-    #         elif current_t < 3*self.T/5:
-    #             Hr = H3
-    #         elif current_t < 4*self.T/5:
-    #             Hr = H4
-    #         else:
-    #             Hr = torch.zeros_like(H1)
-                
-    #         U_step = self.infinitesimal_evol_operator(Hr, H_onsite, dt)
-    #         U = U_step @ U
-    #     # Handle any remaining time
-    #     remaining_time = t - total_steps * dt
-    #     if remaining_time > 0:
-    #         if t < self.T/5:
-    #             Hr = H1
-    #         elif t < 2*self.T/5:
-    #             Hr = H2
-    #         elif t < 3*self.T/5:
-    #             Hr = H3
-    #         elif t < 4*self.T/5:
-    #             Hr = H4
-    #         else:
-    #             Hr = torch.zeros_like(H1)
-            
-    #         U_step = self.infinitesimal_evol_operator(Hr, H_onsite, remaining_time)
-    #         U = U_step @ U
-        
-    #     return U
-    
     def time_evolution_operator_pbc1(self, t, steps_per_segment, kx, ky, pbc, delta=None, reverse=False):
         '''Time evolution operator for time 0 ≤ t ≤ T with a specified number of steps per T/5 segment'''
         '''Support not only scalar (kx, ky, t) pair
@@ -456,10 +436,13 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         is_batch = isinstance(kx, torch.Tensor) and isinstance(ky, torch.Tensor) and kx.dim() + ky.dim() > 1
 
         if is_batch:
-            batch_size = kx.shape[0]  # Total number of (kx, ky) pairs
+            batch_x = kx.shape[0]  # Total number of (kx, ky) pairs
+            batch_y = ky.shape[0]
+            # print(batch_x, batch_y)
         else:
-            batch_size = 1
-
+            batch_x = 1
+            batch_y = 1
+        
         # Handle scalar or tensor `t`
         if isinstance(t, torch.Tensor) and t.dim() > 0:
             batch_t = t.shape[0]  # Total number of time t
@@ -470,42 +453,48 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         
         # Reshape inputs for batch processing
         if isinstance(kx, torch.Tensor):
-            kx = kx.view(batch_size, 1)
+            kx = kx.view(batch_x, 1)
         else:
-            kx = torch.full((batch_size, 1), kx, device=self.device)
+            kx = torch.full((batch_x, 1), kx, device=self.device)
 
         if isinstance(ky, torch.Tensor):
-            ky = ky.view(batch_size, 1)
+            ky = ky.view(batch_y, 1)
         else:
-            ky = torch.full((batch_size, 1), ky, device=self.device)
+            ky = torch.full((batch_y, 1), ky, device=self.device)
 
         t = t.view(batch_t, 1)
-
         
         # Calculate dt based on the number of steps per segment
         dt = self.T / (5 * steps_per_segment)
+        # dt = dt.to(self.device)
         H_onsite = self.Hamiltonian_pbc_onsite(delta)
+        # print('H_onsite', H_onsite)
+        H_onsite = H_onsite.to(self.device)
         # Broadcast H_onsite to match batch size (N_t, N_kx, N_ky, nx*ny, nx*ny)
-        H_onsite = H_onsite.unsqueeze(0).unsqueeze(1).unsqueeze(1).expand(batch_t, batch_size, batch_size, -1, -1)
-        # print(H_onsite.shape)
+        H_onsite = H_onsite.unsqueeze(0).unsqueeze(1).unsqueeze(1).expand(batch_t, batch_x, batch_y, -1, -1)
+        # print('H_onsite', H_onsite.shape)
         if not reverse:  # Anti-clockwise
-            H1 = self.Hamiltonian_pbc1(ky, pbc).unsqueeze(1).expand(-1, batch_size,-1, -1)
-            H2 = self.Hamiltonian_pbc2(kx, pbc).unsqueeze(0).expand(batch_size,-1, -1, -1)
-            H3 = self.Hamiltonian_pbc3(ky, pbc).unsqueeze(1).expand(-1, batch_size,-1, -1)
-            H4 = self.Hamiltonian_pbc4(kx, pbc).unsqueeze(0).expand(batch_size,-1, -1, -1)
+            H1 = self.Hamiltonian_pbc1(ky, pbc).unsqueeze(0).expand(batch_x, -1, -1, -1)
+            # print('H1', H1.shape)
+            H2 = self.Hamiltonian_pbc2(kx, pbc).unsqueeze(1).expand(-1, batch_y,-1, -1)
+            # print('H2', H2.shape)
+            H3 = self.Hamiltonian_pbc3(ky, pbc).unsqueeze(0).expand(batch_x, -1, -1, -1)
+            # print('H3', H3.shape)
+            H4 = self.Hamiltonian_pbc4(kx, pbc).unsqueeze(1).expand(-1, batch_y,-1, -1)
+            # print('H4', H4.shape)
         else:  # Clockwise
-            H1 = self.Hamiltonian_pbc2(kx, pbc).unsqueeze(0).expand(batch_size,-1, -1, -1)
-            H2 = self.Hamiltonian_pbc1(ky, pbc).unsqueeze(1).expand(-1, batch_size,-1, -1)
-            H3 = self.Hamiltonian_pbc4(kx, pbc).unsqueeze(0).expand(batch_size,-1, -1, -1)
-            H4 = self.Hamiltonian_pbc3(ky, pbc).unsqueeze(1).expand(-1, batch_size,-1, -1)
+            H1 = self.Hamiltonian_pbc2(kx, pbc).unsqueeze(1).expand(-1, batch_y,-1, -1)
+            H2 = self.Hamiltonian_pbc1(ky, pbc).unsqueeze(0).expand(batch_x, -1, -1, -1)
+            H3 = self.Hamiltonian_pbc4(kx, pbc).unsqueeze(1).expand(-1, batch_y,-1, -1)
+            H4 = self.Hamiltonian_pbc3(ky, pbc).unsqueeze(0).expand(batch_x, -1, -1, -1)
         ## Adding the batch dimension for different time t so that the dimensions of H are (N_t, N_kx, N_ky, nx*ny, nx*ny)
-        H1 = H1.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
-        H2 = H2.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
-        H3 = H3.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
-        H4 = H4.unsqueeze(0).expand(batch_t, -1, -1, -1, -1)
+        H1 = H1.unsqueeze(0).expand(batch_t, -1, -1, -1, -1).to(self.device)
+        H2 = H2.unsqueeze(0).expand(batch_t, -1, -1, -1, -1).to(self.device)
+        H3 = H3.unsqueeze(0).expand(batch_t, -1, -1, -1, -1).to(self.device)
+        H4 = H4.unsqueeze(0).expand(batch_t, -1, -1, -1, -1).to(self.device)
         # print("H1", H1.shape)
-        identity = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_t, batch_size, batch_size, -1, -1)
-        U = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_t, batch_size, batch_size, -1, -1)
+        identity = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_t, batch_x, batch_y, -1, -1)
+        U = torch.eye(self.nx * self.ny, dtype=torch.cdouble, device=self.device).unsqueeze(0).unsqueeze(1).unsqueeze(2).expand(batch_t, batch_x, batch_y, -1, -1)
         # print("U",U.shape)
         total_steps = torch.floor(t / dt).long()
         # print('total_steps',total_steps)
@@ -515,7 +504,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             active = step < total_steps
             # print(active.shape)
             # active = active.squeeze().unsqueeze(1).unsqueeze(2).expand(-1, batch_size, batch_size)
-            active = active.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+            active = active.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
             # print(active.shape)
             mask1 = (current_t < self.T/5) &  active
             mask2 = (current_t >= self.T/5) & (current_t < 2*self.T/5) & active
@@ -523,19 +512,29 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             mask4 = (current_t >= 3*self.T/5) & (current_t < 4*self.T/5) & active
             mask5 = (current_t >= 4*self.T/5) & active
             # print(step, active)
-            H0 = torch.zeros_like(H1)
-            Hr = torch.zeros_like(H1)
+            H0 = torch.zeros_like(H1).to(self.device)
+            # print(H0.shape)
+            Hr = torch.zeros_like(H1).to(self.device)
+            # print(Hr.shape)
             Hr[mask1] = H1[mask1]
             Hr[mask2] = H2[mask2]
             Hr[mask3] = H3[mask3]
             Hr[mask4] = H4[mask4]
             Hr[mask5] = H0[mask5]
             combined_mask = mask1 | mask2 | mask3 | mask4 | mask5
+            combined_mask = combined_mask.to(self.device)
             combined_mask = combined_mask.unsqueeze(3).unsqueeze(4).expand(-1, -1, -1, self.nx * self.ny, self.nx * self.ny)
             # print(combined_mask)
-            # print(combined_mask.shape)
+            # print(combined_mask)
+            # temp_result = self.infinitesimal_evol_operator(Hr, H_onsite, dt)
+            # print(f"infinitesimal_evol_operator result device: {temp_result.device}")
+            # print("Device check:")
+            # print(f"combined_mask device: {combined_mask.device}")
+            # print(f"Hr device: {Hr.device}")
+            # print(f"H_onsite device: {H_onsite.device}")
+            # print(f"identity device: {identity.device}")
             U_step = torch.where(combined_mask, \
-                              self.infinitesimal_evol_operator(Hr, H_onsite, dt), identity)
+                                self.infinitesimal_evol_operator(Hr, H_onsite, dt), identity)
             U = U_step @ U
         
         # Handle any remaining time
@@ -546,11 +545,11 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         mask4 = (t >= 3*self.T/5) & (t < 4*self.T/5) & (remaining_time > 0)
         mask5 = (t >= 4*self.T/5) & (remaining_time > 0)
         
-        mask1 = mask1.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
-        mask2 = mask2.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
-        mask3 = mask3.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
-        mask4 = mask4.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
-        mask5 = mask5.view(batch_t, 1, 1).expand(-1, batch_size, batch_size)
+        mask1 = mask1.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
+        mask2 = mask2.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
+        mask3 = mask3.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
+        mask4 = mask4.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
+        mask5 = mask5.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
         H0 = torch.zeros_like(H1)
         Hr = torch.zeros_like(H1)
         Hr[mask1] = H1[mask1]
@@ -559,35 +558,37 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         Hr[mask4] = H4[mask4]
         Hr[mask5] = H0[mask5]
         combined_mask = mask1 | mask2 | mask3 | mask4 | mask5
+        combined_mask = combined_mask.to(self.device)
         combined_mask = combined_mask.unsqueeze(3).unsqueeze(4).expand(-1, -1, -1, self.nx * self.ny, self.nx * self.ny)
         # print(combined_mask)
-        remaining_time = remaining_time.view(batch_t, 1, 1, 1, 1).expand(-1, batch_size, batch_size, self.nx * self.ny, self.nx * self.ny)
+        remaining_time = remaining_time.view(batch_t, 1, 1, 1, 1).expand(-1, batch_x, batch_y, self.nx * self.ny, self.nx * self.ny)
+        remaining_time = remaining_time.to(self.device)
         U_step = torch.where(combined_mask, 
-                             self.infinitesimal_evol_operator(Hr, H_onsite, remaining_time), 
-                             identity)
+                            self.infinitesimal_evol_operator(Hr, H_onsite, remaining_time), 
+                            identity)
         U = U_step @ U
         U = U.permute(1, 2, 0, 3, 4)
         return U.squeeze()
     
     def quasienergy_eigenstates(self, k_num, steps_per_segment, delta=None, reverse=False, plot=False, save_path=None, pbc='x'):
         '''The quasi-energy spectrum U(kx, T) for the edge properties'''
-        k_x = torch.linspace(0, 2*torch.pi/self.a, k_num, device=self.device)
-        k_y = torch.linspace(0, 2*torch.pi/self.a, k_num, device=self.device)
-        
+        k_num = k_num + 1
         if pbc == 'x':
-            eigenvalues_matrix = torch.zeros((k_num, self.nx * self.ny), dtype=torch.float, device=self.device)
-            wf_matrix = torch.zeros((k_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.cfloat, device=self.device)
-            
-            for index_i, i in enumerate(k_x):
-                U = self.time_evolution_operator_pbc1(self.T, steps_per_segment, i, 0, 'x', delta, reverse)
-                eigvals, eigvecs = torch.linalg.eig(U)
-                E_T = 1j * torch.log(eigvals) / self.T
-                # Sort the quasienergies
-                E_T, idx = E_T.real.sort()
-                eigvecs = eigvecs[:, idx]
-                # Form the matrices of the eigenvalues and eigenvectors
-                eigenvalues_matrix[index_i] = E_T.real
-                wf_matrix[index_i] = eigvecs
+            k_x = torch.linspace(0, 2*torch.pi/self.a, k_num, device=self.device, dtype=torch.float64)
+            k_y = torch.tensor([0], device=self.device, dtype=torch.float64)  # Create a tensor of zeros with the same shape as k_x
+            eigenvalues_matrix = torch.zeros((k_num, self.nx * self.ny), dtype=torch.float64, device=self.device)
+            wf_matrix = torch.zeros((k_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.complex128, device=self.device)
+            U = self.time_evolution_operator_pbc1(self.T, steps_per_segment, k_x, k_y, 'x', delta, reverse)
+            eigvals, eigvecs = torch.linalg.eig(U)
+            E_T = 1j * torch.log(eigvals) / self.T
+            # Sort the quasienergies
+            E_T, idx = E_T.real.sort(dim=1)
+            # Use advanced indexing to sort eigenvectors
+            eigvecs = eigvecs[torch.arange(k_num).unsqueeze(1), :, idx]
+            # torch.cuda.synchronize()
+            # Form the matrices of the eigenvalues and eigenvectors
+            eigenvalues_matrix = E_T.real
+            wf_matrix = eigvecs
             
             if plot:
                 fig, ax = plt.subplots(figsize=(8, 8))
@@ -599,10 +600,16 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
 
                 ax.set_xticks([0, torch.pi/3, 2*torch.pi/3, torch.pi, 4*torch.pi/3, 5*torch.pi/3, 2*torch.pi])
                 ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
-                
-                k_x_np = k_x.cpu().numpy()
-                eigenvalues_matrix_np = eigenvalues_matrix.cpu().numpy()
-                
+
+                # Print tensor properties and check for NaNs or Infs
+                # print("Eigenvalues matrix shape:", eigenvalues_matrix.shape)
+                # print("Eigenvalues matrix dtype:", eigenvalues_matrix.dtype)
+                # print("Eigenvalues matrix (GPU):", eigenvalues_matrix)
+
+                # Visualization without moving to CPU (only plotting will require moving to CPU)
+                k_x_np = k_x.cpu().numpy()  # We need this for plotting
+                eigenvalues_matrix_np = eigenvalues_matrix.cpu().numpy()  # Only move to CPU for plotting
+                print(eigenvalues_matrix_np)
                 for i in range(k_num):
                     ax.scatter([k_x_np[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix_np[i, :], color='black', s=0.1)
                 
@@ -614,28 +621,84 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                     plt.tight_layout()
                     fig.savefig(save_path, format='pdf', bbox_inches='tight')
                 plt.show()
+
+        elif pbc == 'y':
+            k_y = torch.linspace(0, 2*torch.pi/self.a, k_num, device=self.device, dtype=torch.float64)
+            k_x = torch.tensor([0], device=self.device, dtype=torch.float64)  # Create a tensor of zeros with the same shape as k_x
+            eigenvalues_matrix = torch.zeros((k_num, self.nx * self.ny), dtype=torch.float64, device=self.device)
+            wf_matrix = torch.zeros((k_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.complex128, device=self.device)
+            U = self.time_evolution_operator_pbc1(self.T, steps_per_segment, k_x, k_y, 'y', delta, reverse)
+            eigvals, eigvecs = torch.linalg.eig(U)
+            E_T = 1j * torch.log(eigvals) / self.T
+            # Sort the quasienergies
+            E_T, idx = E_T.real.sort(dim=1)
+            # Use advanced indexing to sort eigenvectors
+            eigvecs = eigvecs[torch.arange(k_num).unsqueeze(1), :, idx]
+            # Form the matrices of the eigenvalues and eigenvectors
+            eigenvalues_matrix = E_T.real
+            wf_matrix = eigvecs
+            if plot:
+                fig, ax = plt.subplots(figsize=(8, 8))
+                tick_label_fontsize = 32
+                label_fontsize = 34
+
+                ax.tick_params(axis='x', labelsize=tick_label_fontsize)
+                ax.tick_params(axis='y', labelsize=tick_label_fontsize)
+
+                ax.set_xticks([0, torch.pi/3, 2*torch.pi/3, torch.pi, 4*torch.pi/3, 5*torch.pi/3, 2*torch.pi])
+                ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
+                
+                k_y_np = k_y.cpu().numpy()
+                eigenvalues_matrix_np = eigenvalues_matrix.cpu().numpy()
+                
+                for i in range(k_num):
+                    ax.scatter([k_y_np[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix_np[i, :], color='black', s=0.1)
+                
+                ax.set_xlabel(r'$k_{y}$', fontsize=label_fontsize)
+                ax.set_xlim(0, 2*torch.pi/self.a)
+                ax.set_ylim(-torch.pi/self.T, torch.pi/self.T)
+                
+                if save_path:
+                    plt.tight_layout()
+                    fig.savefig(save_path, format='pdf', bbox_inches='tight')
+                plt.show()
         
         elif pbc == "xy":
-            eigenvalues_matrix = torch.zeros((k_num, k_num, self.nx * self.ny), dtype=torch.float, device=self.device)
-            wf_matrix = torch.zeros((k_num, k_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.cfloat, device=self.device)
+            k_x = torch.linspace(0, 2*torch.pi/self.a, k_num, device=self.device, dtype=torch.float64)
+            k_y = torch.linspace(0, 2*torch.pi/self.a, k_num, device=self.device, dtype=torch.float64)
+            eigenvalues_matrix = torch.zeros((k_num, k_num, self.nx * self.ny), dtype=torch.float64, device=self.device)
+            wf_matrix = torch.zeros((k_num, k_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.complex128, device=self.device)
+            # print(wf_matrix.shape)
+            U = self.time_evolution_operator_pbc1(self.T, steps_per_segment, k_x, k_y, 'xy', delta, reverse)
             
-            for index_i, i in enumerate(k_x):
-                for index_j, j in enumerate(k_y):
-                    U = self.time_evolution_operator_pbc1(self.T, steps_per_segment, i, j, 'xy', delta, reverse)
-                    eigvals, eigvecs = torch.linalg.eig(U)
-                    E_T = 1j * torch.log(eigvals) / self.T
-                    # Sort the quasienergies
-                    E_T, idx = E_T.real.sort()
-                    eigvecs = eigvecs[:, idx]
-                    # Form the tensors of the eigenvalues and eigenvectors
-                    eigenvalues_matrix[index_i, index_j] = E_T.real
-                    wf_matrix[index_i, index_j] = eigvecs
-            
+            # print("U computed successfully")
+            eigvals, eigvecs = torch.linalg.eig(U)
+            # print("Eigendecomposition successful")
+            # Compute the real part of the eigenvalues for sorting
+            eigv = -1j * torch.log(eigvals) / self.T
+            eigv_r = eigv.real
+
+            # Sort the eigenvalues based on their real parts
+            sorted_indices = torch.argsort(eigv_r, dim=-1)
+
+            # Reorder the eigenvalues, their real parts of the log(eigenvalues), and the eigenvectors
+            sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
+            sorted_eigv_r = torch.gather(eigv_r, -1, sorted_indices)
+            expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
+            sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
+
+            # print("everything is good", sorted_eigvecs.shape)
+
+            # Form the tensors of the eigenvalues and eigenvectors
+            eigenvalues_matrix = sorted_eigv_r.real
+            wf_matrix = sorted_eigvecs
             if plot:
                 fig = plt.figure()
                 ax = fig.add_subplot(111, projection='3d')
-                X, Y = torch.meshgrid(k_x, k_y, indexing='ij')
-                X_np, Y_np = X.cpu().numpy(), Y.cpu().numpy()
+                k_x_cpu = k_x.cpu()
+                k_y_cpu = k_y.cpu()
+                X, Y = torch.meshgrid(k_x_cpu, k_y_cpu, indexing='ij')
+                X_np, Y_np = X.numpy(), Y.numpy()
                 eigenvalues_matrix_np = eigenvalues_matrix.cpu().numpy()
                 
                 tick_label_fontsize = 22
@@ -652,25 +715,341 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         
         return eigenvalues_matrix, wf_matrix
     
-    ## The following functions 
-    def eigen_grid(self, N_div, steps_per_segment, delta=None, reverse=False, plot=False, save_path=None, pbc='xy'):
-        '''The eigenvalues and eigenvectors on the grid of the quasienergy spectrum'''
+    ## The following functions calculate the winding numbers of the quasienergy spectrum starting from obtaining the eigenvalues and eigenvectors on the grid of the quasienergy spectrum
+    def eigen_grid(self, N_div, steps_per_segment, log=False, delta=None, reverse=False, pbc='xy'):
+        '''Version 1
+        The eigenvalues and eigenvectors on the grid of the quasienergy spectrum'''
         k_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
         k_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
-        t = torch.linspace(0, self.T, N_div, device=self.device)
+        t = torch.linspace(0, self.T, N_div+1, device=self.device)
+        # t = torch.tensor([2.0], dtype=torch.float64, device=self.device)
         # Remove the first element (0) from each tensor: see the numerical approx of the W3
-        k_x = k_x[1:]
-        k_y = k_y[1:]
-        t = t[1:]
+        # k_x = k_x[1:]
+        # k_y = k_y[1:]
+        # t = t[1:]
         ## The eigenvalues and eigenvectors on the grid of the quasienergy spectrum
         ## The dimension of the eigenvalues_matrix is (N_kx, N_ky, N_t, nx*ny)
         ## The dimension of the wf_matrix is (N_kx, N_ky, N_t, nx*ny, nx*ny)
         U_tensor = self.time_evolution_operator_pbc1(t, steps_per_segment, k_x, k_y, pbc, delta, reverse)
         eigvals, eigvecs = torch.linalg.eig(U_tensor)
-        return eigvals, eigvecs
+        # Compute the real part of the eigenvalues for sorting
+        eigv = -1j * torch.log(eigvals)
+        # print(eigv)
+        eigv_r = eigv.real
+        # print(eigv_r)
+        # Sort the eigenvalues based on their real parts
+        sorted_indices = torch.argsort(eigv_r, dim=-1)
+        # print(sorted_indices)
+        # Reorder the eigenvalues, their real parts of the log(eigenvalues), and the eigenvectors
+        sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
+        sorted_eigv_r = torch.gather(eigv_r, -1, sorted_indices)
+        # print(sorted_eigv_r)
+        expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
+        sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
+        if log:
+            return sorted_eigv_r, sorted_eigvecs
+        else:
+            return sorted_eigvals, sorted_eigvecs
+    
+    def animate_quasienergy_spectra(self, N_div, steps_per_segment, delta=None, reverse=False, pbc='xy', fps=5, filename= None):
+        sorted_eigv_r, _ = self.eigen_grid(N_div, steps_per_segment, log=True, delta=delta, reverse=reverse, pbc=pbc)
+        k_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        k_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        def update(frame):
+            ax.clear()
+            kx, ky = np.meshgrid(k_x, k_y)
+            z = sorted_eigv_r[:, :, frame].cpu().numpy()
+            for i in range(z.shape[-1]):
+                ax.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
+            ax.set_xlabel('k_x')
+            ax.set_ylabel('k_y')
+            ax.set_zlabel('Quasienergy')
+            ax.set_title(f'Time Shot: {frame}')
+            ax.set_zlim(-torch.pi, torch.pi)
+
+        ani = animation.FuncAnimation(fig, update, frames=sorted_eigv_r.shape[2], interval=1000/fps, blit=False)
         
+        if filename is not None:
+            ani.save(filename, writer='ffmpeg')
+
+        plt.show()
     
+    def S(self, p, eigvals, eigvecs, N_div):
+        """
+        Get eigenvalues and eigenvectors at given points p using pre-computed values.
+
+        Parameters:
+        p (torch.Tensor): Points in parameter space (kx, ky, t), shape (num_points, 3) or (3,)
+        eigvals (torch.Tensor): Pre-computed -1j log(eigenvalues) from eigen_grid
+        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
+        N_div (int): Number of divisions in each dimension
+
+        Returns:
+        tuple: (eigenvalues, eigenvectors) at points p
+        """
+        delta = 1/N_div
+        delta_space = delta * torch.pi * 2/self.a
+        delta_t = delta * self.T
+        # Convert p to indices in the eigvals/eigvecs tensors
+        # Compute indices based on delta values
+        kx_idx = torch.round(p[..., 0] / delta_space).long()
+        ky_idx = torch.round(p[..., 1] / delta_space).long()
+        t_idx = torch.round(p[..., 2] / delta_t).long()
+        # print(kx_idx, ky_idx, t_idx)
+        # Handle case where p contains multiple points
+        if p.ndim == 2:
+            # Convert tensor indices to integers for each point
+            kx_idx = kx_idx.tolist()
+            ky_idx = ky_idx.tolist()
+            t_idx = t_idx.tolist()
+
+            # Gather the eigenvalues and eigenvectors at the specified indices for each point
+            eigenvalues = [eigvals[kx, ky, t] for kx, ky, t in zip(kx_idx, ky_idx, t_idx)]
+            eigenvectors = [eigvecs[kx, ky, t] for kx, ky, t in zip(kx_idx, ky_idx, t_idx)]
+            return torch.stack(eigenvalues), torch.stack(eigenvectors)
+
+        # Handle single point
+        kx_idx = kx_idx.item()
+        ky_idx = ky_idx.item()
+        t_idx = t_idx.item()
+        print(kx_idx, ky_idx, t_idx)
+        # Return the eigenvalues and eigenvectors at the specified indices
+        return eigvals[kx_idx, ky_idx, t_idx], eigvecs[kx_idx, ky_idx, t_idx]
+
+    def U_nu(self, s_nu_pi, s_nu_pj):
+        """Version 1: Support batch processing: Checked
+        Compute U_nu as defined in the paper.
+
+        Parameters:
+        s_nu_pi (torch.Tensor): Eigenvector at point pi
+        s_nu_pj (torch.Tensor): Eigenvector at point pj
+
+        Returns:
+        torch.Tensor: U_nu value
+        """
+        # print("vector1", s_nu_pi)
+        # print("vector2", s_nu_pj)
+        inner_product = torch.sum(s_nu_pi.conj() * s_nu_pj, dim=0)
+        print("inner", inner_product)
+        abs_inner_product = torch.abs(inner_product)
+        print("abs", abs_inner_product)
+        # Handle cases where abs_inner_product is close to zero
+        # mask = abs_inner_product < 1e-10
+        # result = torch.where(mask, 
+        #                     torch.ones_like(inner_product),  # Default to 1 when close to zero
+        #                     inner_product / abs_inner_product)
+        result = inner_product / abs_inner_product
+        print("result", result)
+        return result
     
+    def face_F_hat(self, p, alpha, eigvals, eigvecs, N_div):
+        """
+        Compute F̂νp,α for a face as defined in equation 4.1.
+        
+        Parameters:
+        p (torch.Tensor): Base point of the face (can be a batch of vectors)
+        alpha (int): Direction index (1, 2, or 3)
+        delta (float): Grid spacing
+        eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
+        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
+        N_div (int): Number of divisions in each dimension
+        
+        Returns:
+        torch.Tensor: F̂νp,α values for the face
+        """
+        delta = 1/N_div
+        delta_space = delta * torch.pi * 2/self.a
+        delta_t = delta * self.T
+        # Define the vertices of the face based on Table 1
+        if alpha == 1:
+            p1 = p
+            p2 = p + torch.tensor([0, delta_space, 0], dtype=torch.float64, device=p.device)
+            p3 = p + torch.tensor([0, delta_space, delta_t], dtype=torch.float64, device=p.device)
+            p4 = p + torch.tensor([0, 0, delta_t], dtype=torch.float64, device=p.device)
+        elif alpha == 2:
+            p1 = p
+            p2 = p + torch.tensor([0, 0, delta_t], dtype=torch.float64, device=p.device)
+            p3 = p + torch.tensor([delta_space, 0, delta_t], dtype=torch.float64, device=p.device)
+            p4 = p + torch.tensor([delta_space, 0, 0], dtype=torch.float64, device=p.device)
+        elif alpha == 3:
+            p1 = p
+            p2 = p + torch.tensor([delta_space, 0, 0], dtype=torch.float64, device=p.device)
+            p3 = p + torch.tensor([delta_space, delta_space, 0], dtype=torch.float64, device=p.device)
+            p4 = p + torch.tensor([0, delta_space, 0], dtype=torch.float64, device=p.device)
+        else:
+            raise ValueError("alpha must be 1, 2, or 3")
+        
+        # Get eigenvectors and eigenvalues at each vertex
+        e1, v1 = self.S(p1, eigvals, eigvecs, N_div)
+        e2, v2 = self.S(p2, eigvals, eigvecs, N_div)
+        e3, v3 = self.S(p3, eigvals, eigvecs, N_div)
+        e4, v4 = self.S(p4, eigvals, eigvecs, N_div)
+        
+        # Sort e2, v2, e3, v3, e4, v4 based on similarity to e1, v1
+        # e2, v2 = self.sort_eig(e1, v1, e2, v2)
+        # e3, v3 = self.sort_eig(e1, v1, e3, v3)
+        # e4, v4 = self.sort_eig(e1, v1, e4, v4)
+        
+        # Compute U_nu for each edge
+        U12 = self.U_nu(v1, v2)
+        print('U12', U12)
+        U23 = self.U_nu(v2, v3)
+        print('U23', U23)
+        U34 = self.U_nu(v3, v4)
+        print('U34', U34)
+        U41 = self.U_nu(v4, v1)
+        print('U41', U41)
+        # Compute F̂νp,α
+        product = U12 * U23 * U34 * U41
+        print('product', product)
+        F_hat = (1 / (2 * torch.pi * 1j)) * torch.log(product)
+        print('F_hat', F_hat)
+        return F_hat.real
+    
+    def cube(self, p, eigvals, eigvecs, N_div):
+        """
+        Compute the cube function as defined in equation 4.3 of the paper.
+        
+        Parameters:
+        p (torch.Tensor): Base point of the cube (can be a batch of vectors)
+        eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
+        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
+        N_div (int): Number of divisions in each dimension
+        
+        Returns:
+        torch.Tensor: Cube function values for each band
+        """
+        band = self.nx * self.ny
+        C_p = torch.zeros(band, dtype=torch.float64, device=self.device)
+        delta = 1/N_div
+        delta_space = delta * torch.pi * 2/self.a
+        delta_t = delta * self.T
+        # Define the displacement vectors
+        d = [torch.tensor([delta_space, 0, 0], dtype=torch.float64, device=p.device), 
+            torch.tensor([0, delta_space, 0], dtype=torch.float64, device=p.device), 
+            torch.tensor([0, 0, delta_t], dtype=torch.float64, device=p.device)]
+        # print(d)
+        for nu in range(band):
+            for alpha in range(3):
+                # Compute p + dα
+                p_plus_d = p + d[alpha]
+                
+                # Compute ˆFνp+dα,α
+                F_plus = self.face_F_hat(p_plus_d, alpha+1, eigvals, eigvecs, N_div)[nu]
+                
+                # Compute ˆFνp,α
+                F = self.face_F_hat(p, alpha+1, eigvals, eigvecs, N_div)[nu]
+                
+                # Add to the sum
+                C_p[nu] += F_plus - F
+        
+        C_p = torch.round(C_p)
+        if torch.sum(C_p) != 0:
+            print("Warning: The sum of the elements in C_p is non-zero.")
+        return C_p
+    
+    def sort_eig(self, eigvals_ref, eigvecs_ref, eigvals, eigvecs):
+        """
+        Sort eigenvalues and eigenvectors based on the distance to reference eigenvalues.
+        Use eigenvector overlap only when eigenvalues are degenerate.
+        
+        Parameters:
+        eigvals_ref, eigvecs_ref: Reference eigenvalues and eigenvectors
+        eigvals, eigvecs: Eigenvalues and eigenvectors to be sorted
+        tol: Tolerance for considering eigenvalues as degenerate
+        
+        Returns:
+        Sorted eigenvalues and eigenvectors
+        """
+        distances = torch.abs(eigvals.unsqueeze(-2) - eigvals_ref.unsqueeze(-1))
+        indices = torch.argmin(distances, dim=-1)
+        
+        sorted_eigvals = torch.gather(eigvals, -1, indices)
+    
+        # Sort eigenvectors using the indices
+        expanded_indices = indices.unsqueeze(-2).expand(*eigvecs.shape[:-1], eigvecs.shape[-1])
+        sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
+        
+        return sorted_eigvals, sorted_eigvecs
+    
+    def determine_m(self, p, alpha, eigvals, eigvecs, N_div):
+        """
+        Determine m^nu_p,alpha such that |φ^nu_p - φ^nu_(p-δ_alpha) + 2πm^nu_p,alpha| < π
+        
+        Parameters:
+        p (torch.Tensor): Coordinate in parameter space (kx, ky, t)
+        alpha (int): Direction index (1, 2, or 3)
+        eigvals (torch.Tensor): Pre-computed -1j log(eigenvalues) from eigen_grid
+        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
+        N_div (int): Number of divisions in each dimension
+        
+        Returns:
+        torch.Tensor: m^nu_p,alpha
+        """
+        # Get eigenvalues at p
+        phi_p, _ = self.S(p, eigvals, eigvecs, N_div)
+        # phi_p = -1j * torch.log(phi_p)
+        
+        # Calculate p - δ_alpha
+        p_minus_delta = p.clone()
+        delta = 1/N_div
+        delta_space = delta * torch.pi * 2/self.a
+        delta_t = delta * self.T
+        if alpha == 1 or alpha == 2:
+            p_minus_delta[alpha-1] -= delta_space
+        else:
+            p_minus_delta[alpha-1] -= delta_t
+        
+        # Get eigenvalues at p - δ_alpha
+        phi_p_minus_delta, _ = self.S(p_minus_delta, eigvals, eigvecs, N_div)
+        # e_p_minus_delta, _ = self.sort_eig(e_p, None, e_p_minus_delta, None)
+        # phi_p_minus_delta = -1j * torch.log(phi_p_minus_delta)
+        
+        # Calculate the difference
+        diff = phi_p - phi_p_minus_delta
+        
+        # Determine m
+        m = - torch.floor((diff + torch.pi) / (2 * torch.pi))
+        
+        return m.long()
+        
+    def determine_M(self, p, eigvals, eigvecs, N_div, C_p):
+        """
+        Determine M^ν_p when Ĉ^ν_p ≠ 0 for two indices ν, ν'
+        
+        Parameters:
+        p (torch.Tensor): Coordinate in parameter space (kx, ky, t)
+        eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
+        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
+        N_div (int): Number of divisions in each dimension
+        C_p (torch.Tensor): Ĉ^ν_p values
+        
+        Returns:
+        torch.Tensor: M^ν_p values
+        """
+        ## Get eigenvalues at p
+        phi_p, _ = self.S(p, eigvals, eigvecs, N_div)
+        # phi_p = -1j * torch.log(phi_p)
+        
+        M_p = torch.zeros_like(C_p)
+        non_zero_indices = torch.nonzero(C_p).squeeze()
+        
+        if len(non_zero_indices) == 2:
+            nu, nu_prime = non_zero_indices
+            diff = phi_p[nu] - phi_p[nu_prime]
+            M_nu = - torch.floor((diff + torch.pi) / (2 * torch.pi))
+            
+            M_p[nu] = M_nu
+        
+        return M_p
+        
+        
+    # def w3(self, N_div, steps_per_segment, delta=None, reverse=False):
+        
+        
     
 class tb_floquet_tbc_cuda(nn.Module):
     def __init__(self, period, lattice_constant, J_coe, ny, nx=2, device=None):
@@ -685,8 +1064,7 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         # Check if device is manually set or based on GPU availability
         if device is None:
-            # Move the model to the designated device
-            self.to(self.device) 
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
 
@@ -1264,8 +1642,6 @@ class tb_floquet_tbc_cuda(nn.Module):
             U = U_step @ U
         
         return U
-        
-        
     
     ## Exploring the bulk properties of the system
     ## Function 1. Quasienergies and states -- COMPLETED
