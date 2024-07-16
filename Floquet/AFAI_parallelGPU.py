@@ -501,17 +501,18 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         max_steps = total_steps.max().item()
         for step in range(max_steps):
             current_t = step * dt
+            current_t_mod = current_t % self.T
             active = step < total_steps
             # print(active.shape)
             # active = active.squeeze().unsqueeze(1).unsqueeze(2).expand(-1, batch_size, batch_size)
             active = active.view(batch_t, 1, 1).expand(-1, batch_x, batch_y)
             # print(active.shape)
-            mask1 = (current_t < self.T/5) &  active
-            mask2 = (current_t >= self.T/5) & (current_t < 2*self.T/5) & active
-            mask3 = (current_t >= 2*self.T/5) & (current_t < 3*self.T/5) & active
-            mask4 = (current_t >= 3*self.T/5) & (current_t < 4*self.T/5) & active
-            mask5 = (current_t >= 4*self.T/5) & active
-            # print(step, active)
+            mask1 = (current_t_mod < self.T/5) &  active
+            mask2 = (current_t_mod >= self.T/5) & (current_t_mod < 2*self.T/5) & active
+            mask3 = (current_t_mod >= 2*self.T/5) & (current_t_mod < 3*self.T/5) & active
+            mask4 = (current_t_mod >= 3*self.T/5) & (current_t_mod < 4*self.T/5) & active
+            mask5 = (current_t_mod >= 4*self.T/5) & active
+            # print(step, mask1, mask2, mask3, mask4, mask5)
             H0 = torch.zeros_like(H1).to(self.device)
             # print(H0.shape)
             Hr = torch.zeros_like(H1).to(self.device)
@@ -539,6 +540,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         
         # Handle any remaining time
         remaining_time = t - total_steps * dt
+        # print('remaining_time',remaining_time)
         mask1 = (t < self.T/5) & (remaining_time > 0)
         mask2 = (t >= self.T/5) & (t < 2*self.T/5) & (remaining_time > 0)
         mask3 = (t >= 2*self.T/5) & (t < 3*self.T/5) & (remaining_time > 0)
@@ -716,17 +718,12 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         return eigenvalues_matrix, wf_matrix
     
     ## The following functions calculate the winding numbers of the quasienergy spectrum starting from obtaining the eigenvalues and eigenvectors on the grid of the quasienergy spectrum
-    def eigen_grid(self, N_div, steps_per_segment, log=False, delta=None, reverse=False, pbc='xy'):
+    def eigen_grid(self, N_div, steps_per_segment, delta=None, reverse=False, plot=False, save_path=None, pbc='xy'):
         '''Version 1
         The eigenvalues and eigenvectors on the grid of the quasienergy spectrum'''
         k_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
         k_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
         t = torch.linspace(0, self.T, N_div+1, device=self.device)
-        # t = torch.tensor([2.0], dtype=torch.float64, device=self.device)
-        # Remove the first element (0) from each tensor: see the numerical approx of the W3
-        # k_x = k_x[1:]
-        # k_y = k_y[1:]
-        # t = t[1:]
         ## The eigenvalues and eigenvectors on the grid of the quasienergy spectrum
         ## The dimension of the eigenvalues_matrix is (N_kx, N_ky, N_t, nx*ny)
         ## The dimension of the wf_matrix is (N_kx, N_ky, N_t, nx*ny, nx*ny)
@@ -736,40 +733,66 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         eigv = -1j * torch.log(eigvals)
         # print(eigv)
         eigv_r = eigv.real
-        # print(eigv_r)
+        
         # Sort the eigenvalues based on their real parts
         sorted_indices = torch.argsort(eigv_r, dim=-1)
-        # print(sorted_indices)
+        
         # Reorder the eigenvalues, their real parts of the log(eigenvalues), and the eigenvectors
         sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
         sorted_eigv_r = torch.gather(eigv_r, -1, sorted_indices)
-        # print(sorted_eigv_r)
+        
         expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
         sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
-        if log:
-            return sorted_eigv_r, sorted_eigvecs
-        else:
-            return sorted_eigvals, sorted_eigvecs
-    
-    def animate_quasienergy_spectra(self, N_div, steps_per_segment, delta=None, reverse=False, pbc='xy', fps=5, filename= None):
-        sorted_eigv_r, _ = self.eigen_grid(N_div, steps_per_segment, log=True, delta=delta, reverse=reverse, pbc=pbc)
+        if plot == True:
+            fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
+        
+            def update(frame):
+                ax.clear()
+                ax.set_ylim(0, 1.1)
+                
+                # Get eigenvalues for this time frame
+                eigvals_t = sorted_eigvals[:, :, frame, :].reshape(-1)
+                
+                # Debugging prints
+                # print(f"Frame {frame}: Min abs: {torch.min(torch.abs(eigvals_t))}, Max abs: {torch.max(torch.abs(eigvals_t))}")
+                # print(f"Number of eigenvalues: {eigvals_t.numel()}")
+                
+                # Convert to numpy and handle potential complex numbers
+                eigvals_np = eigvals_t.cpu().numpy()
+                angles = np.angle(eigvals_np)
+                magnitudes = np.abs(eigvals_np)
+                
+                # Plot eigenvalues on complex unit circle
+                scatter = ax.scatter(angles, magnitudes, alpha=0.5, s=30)
+                
+                ax.set_title(f'Eigenvalues at t = {t[frame].item():.2f}')
+                return scatter,
+            
+            ani = animation.FuncAnimation(fig, update, frames=N_div+1, blit=True)
+            
+            if save_path is not None:
+                ani.save(save_path, writer='ffmpeg')
+            plt.show()
+        return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
+        
+    def animate_quasienergy_spectra(self, N_div, steps_per_segment, delta=None, reverse=False, fps=5, filename= None):
+        sorted_eigv_r, _, _ = self.eigen_grid(N_div, steps_per_segment, delta=delta, reverse=reverse, pbc='xy')
         k_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
         k_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
         fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-
+        ax1 = fig.add_subplot(111, projection='3d')
         def update(frame):
-            ax.clear()
+            ax1.clear()
             kx, ky = np.meshgrid(k_x, k_y)
             z = sorted_eigv_r[:, :, frame].cpu().numpy()
             for i in range(z.shape[-1]):
-                ax.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
-            ax.set_xlabel('k_x')
-            ax.set_ylabel('k_y')
-            ax.set_zlabel('Quasienergy')
-            ax.set_title(f'Time Shot: {frame}')
-            ax.set_zlim(-torch.pi, torch.pi)
-
+                ax1.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
+            ax1.set_xlabel('k_x')
+            ax1.set_ylabel('k_y')
+            ax1.set_zlabel('Quasienergy')
+            ax1.set_title(f'Time Shot: {frame}')
+            ax1.set_zlim(-torch.pi, torch.pi)
+            ax1.view_init(elev=2, azim=5)
         ani = animation.FuncAnimation(fig, update, frames=sorted_eigv_r.shape[2], interval=1000/fps, blit=False)
         
         if filename is not None:
@@ -777,48 +800,49 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
 
         plt.show()
     
-    def S(self, p, eigvals, eigvecs, N_div):
-        """
-        Get eigenvalues and eigenvectors at given points p using pre-computed values.
+    def animate_combined_spectra(self, N_div, steps_per_segment, delta=None, reverse=False, fps=5, filename= None):
+        sorted_eigv_r, sorted_eigvals, _ = self.eigen_grid(N_div, steps_per_segment, delta=delta, reverse=reverse, pbc="xy")
+        k_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        k_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        t = torch.linspace(0, self.T, N_div+1, device=self.device)
 
-        Parameters:
-        p (torch.Tensor): Points in parameter space (kx, ky, t), shape (num_points, 3) or (3,)
-        eigvals (torch.Tensor): Pre-computed -1j log(eigenvalues) from eigen_grid
-        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
-        N_div (int): Number of divisions in each dimension
-
-        Returns:
-        tuple: (eigenvalues, eigenvectors) at points p
-        """
-        delta = 1/N_div
-        delta_space = delta * torch.pi * 2/self.a
-        delta_t = delta * self.T
-        # Convert p to indices in the eigvals/eigvecs tensors
-        # Compute indices based on delta values
-        kx_idx = torch.round(p[..., 0] / delta_space).long()
-        ky_idx = torch.round(p[..., 1] / delta_space).long()
-        t_idx = torch.round(p[..., 2] / delta_t).long()
-        # print(kx_idx, ky_idx, t_idx)
-        # Handle case where p contains multiple points
-        if p.ndim == 2:
-            # Convert tensor indices to integers for each point
-            kx_idx = kx_idx.tolist()
-            ky_idx = ky_idx.tolist()
-            t_idx = t_idx.tolist()
-
-            # Gather the eigenvalues and eigenvectors at the specified indices for each point
-            eigenvalues = [eigvals[kx, ky, t] for kx, ky, t in zip(kx_idx, ky_idx, t_idx)]
-            eigenvectors = [eigvecs[kx, ky, t] for kx, ky, t in zip(kx_idx, ky_idx, t_idx)]
-            return torch.stack(eigenvalues), torch.stack(eigenvectors)
-
-        # Handle single point
-        kx_idx = kx_idx.item()
-        ky_idx = ky_idx.item()
-        t_idx = t_idx.item()
-        print(kx_idx, ky_idx, t_idx)
-        # Return the eigenvalues and eigenvectors at the specified indices
-        return eigvals[kx_idx, ky_idx, t_idx], eigvecs[kx_idx, ky_idx, t_idx]
-
+        fig = plt.figure(figsize=(20, 10))
+        ax1 = fig.add_subplot(121, projection='3d')
+        ax2 = fig.add_subplot(122, projection='polar')
+        def update(frame):
+            ax1.clear()
+            ax2.clear()
+            # 3D quasienergy plot
+            kx, ky = np.meshgrid(k_x, k_y)
+            z = sorted_eigv_r[:, :, frame].cpu().numpy()
+            for i in range(z.shape[-1]):
+                ax1.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
+            ax1.set_xlabel('k_x')
+            ax1.set_ylabel('k_y')
+            ax1.set_zlabel('Quasienergy')
+            ax1.set_title(f'Time Shot: {frame}')
+            ax1.set_zlim(-torch.pi, torch.pi)
+            ax1.view_init(elev=2, azim=5)
+            # Polar plot of eigenvalues
+            eigvals_t = sorted_eigvals[:, :, frame, :].reshape(-1)
+            # Convert to numpy and handle potential complex numbers
+            eigvals_np = eigvals_t.cpu().numpy()
+            angles = np.angle(eigvals_np)
+            magnitudes = np.abs(eigvals_np)
+            # Plot eigenvalues on complex unit circle
+            scatter = ax2.scatter(angles, magnitudes, alpha=0.5, s=30)
+            ax2.set_ylim(0, 1.1)
+            ax2.set_yticks([1])  # Only show tick at r=1
+            ax2.set_title(f'Eigenvalues at t = {t[frame].item():.2f}')
+            
+            return ax1, scatter
+        
+        ani = animation.FuncAnimation(fig, update, frames=sorted_eigv_r.shape[2], interval=1000/fps, blit=False)
+        
+        if filename is not None:
+            ani.save(filename, writer='ffmpeg')
+        plt.show()
+            
     def U_nu(self, s_nu_pi, s_nu_pj):
         """Version 1: Support batch processing: Checked
         Compute U_nu as defined in the paper.
@@ -830,91 +854,85 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         Returns:
         torch.Tensor: U_nu value
         """
-        # print("vector1", s_nu_pi)
-        # print("vector2", s_nu_pj)
         inner_product = torch.sum(s_nu_pi.conj() * s_nu_pj, dim=0)
-        print("inner", inner_product)
+        # print(inner_product)
         abs_inner_product = torch.abs(inner_product)
-        print("abs", abs_inner_product)
-        # Handle cases where abs_inner_product is close to zero
-        # mask = abs_inner_product < 1e-10
-        # result = torch.where(mask, 
-        #                     torch.ones_like(inner_product),  # Default to 1 when close to zero
-        #                     inner_product / abs_inner_product)
+        # print(abs_inner_product)
         result = inner_product / abs_inner_product
-        print("result", result)
         return result
+
+    def mod(self, a, b):
+        return ((a - 1) % b) + 1
+
+    def face_F_hat(self, i, j, k, N_div, eigvals, eigvecs):
+        """Version 2: Batch processing of three alpha values 
+        Compute F̂νp,α for all three faces (α = 1, 2, 3) simultaneously.
     
-    def face_F_hat(self, p, alpha, eigvals, eigvecs, N_div):
-        """
-        Compute F̂νp,α for a face as defined in equation 4.1.
-        
         Parameters:
-        p (torch.Tensor): Base point of the face (can be a batch of vectors)
-        alpha (int): Direction index (1, 2, or 3)
-        delta (float): Grid spacing
+        i, j, k (int): Indices of the base point of the faces
         eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
         eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
         N_div (int): Number of divisions in each dimension
-        
         Returns:
-        torch.Tensor: F̂νp,α values for the face
+        torch.Tensor: F̂νp,α values for all three faces, shape (3, num_bands)
         """
-        delta = 1/N_div
-        delta_space = delta * torch.pi * 2/self.a
-        delta_t = delta * self.T
-        # Define the vertices of the face based on Table 1
-        if alpha == 1:
-            p1 = p
-            p2 = p + torch.tensor([0, delta_space, 0], dtype=torch.float64, device=p.device)
-            p3 = p + torch.tensor([0, delta_space, delta_t], dtype=torch.float64, device=p.device)
-            p4 = p + torch.tensor([0, 0, delta_t], dtype=torch.float64, device=p.device)
-        elif alpha == 2:
-            p1 = p
-            p2 = p + torch.tensor([0, 0, delta_t], dtype=torch.float64, device=p.device)
-            p3 = p + torch.tensor([delta_space, 0, delta_t], dtype=torch.float64, device=p.device)
-            p4 = p + torch.tensor([delta_space, 0, 0], dtype=torch.float64, device=p.device)
-        elif alpha == 3:
-            p1 = p
-            p2 = p + torch.tensor([delta_space, 0, 0], dtype=torch.float64, device=p.device)
-            p3 = p + torch.tensor([delta_space, delta_space, 0], dtype=torch.float64, device=p.device)
-            p4 = p + torch.tensor([0, delta_space, 0], dtype=torch.float64, device=p.device)
-        else:
-            raise ValueError("alpha must be 1, 2, or 3")
+        # Define the vertices of the faces for all three alphas
+        ## Version 1
+        # vertices = torch.tensor([
+        #     # alpha = 1
+        #     [[i%N_div, j%N_div, k%N_div], 
+        #     [i%N_div, (j+1)%N_div, k%N_div], 
+        #     [i%N_div, (j+1)%N_div, (k+1)%N_div], 
+        #     [i%N_div, j%N_div, (k+1)%N_div]],
+        #     # alpha = 2
+        #     [[i%N_div, j%N_div, k%N_div], 
+        #     [i%N_div, j%N_div, (k+1)%N_div], 
+        #     [(i+1)%N_div, j%N_div, (k+1)%N_div], 
+        #     [(i+1)%N_div, j%N_div, k%N_div]],
+        #     # alpha = 3
+        #     [[i%N_div, j%N_div, k%N_div], 
+        #     [(i+1)%N_div, j%N_div, k%N_div], 
+        #     [(i+1)%N_div, (j+1)%N_div, k%N_div], 
+        #     [i%N_div, (j+1)%N_div, k%N_div]]
+        # ], dtype=torch.long, device=self.device)
+        ## Version 2
+        vertices = torch.tensor([
+            # alpha = 1
+            [[self.mod(i, N_div), self.mod(j, N_div), self.mod(k, N_div)], 
+            [self.mod(i, N_div), self.mod(j+1, N_div), self.mod(k, N_div)], 
+            [self.mod(i, N_div), self.mod(j+1, N_div), self.mod(k+1, N_div)], 
+            [self.mod(i, N_div), self.mod(j, N_div), self.mod(k+1, N_div)]],
+            # alpha = 2
+            [[self.mod(i, N_div), self.mod(j, N_div), self.mod(k, N_div)], 
+            [self.mod(i, N_div), self.mod(j, N_div), self.mod(k+1, N_div)], 
+            [self.mod(i+1, N_div), self.mod(j, N_div), self.mod(k+1, N_div)], 
+            [self.mod(i+1, N_div), self.mod(j, N_div), self.mod(k, N_div)]],
+            # alpha = 3
+            [[self.mod(i, N_div), self.mod(j, N_div), self.mod(k, N_div)],
+            [self.mod(i+1, N_div), self.mod(j, N_div), self.mod(k, N_div)], 
+            [self.mod(i+1, N_div), self.mod(j+1, N_div), self.mod(k, N_div)], 
+            [self.mod(i, N_div), self.mod(j+1, N_div), self.mod(k, N_div)]]
+        ], dtype=torch.long, device=self.device)
         
-        # Get eigenvectors and eigenvalues at each vertex
-        e1, v1 = self.S(p1, eigvals, eigvecs, N_div)
-        e2, v2 = self.S(p2, eigvals, eigvecs, N_div)
-        e3, v3 = self.S(p3, eigvals, eigvecs, N_div)
-        e4, v4 = self.S(p4, eigvals, eigvecs, N_div)
+        # print("vertices for face", vertices)
+        # Get eigenvectors at each vertex for all faces
+        v = [[eigvecs[tuple(v)] for v in face] for face in vertices]
+        # Compute U_nu for each edge of each face
+        U12 = torch.stack([self.U_nu(v[alpha][0], v[alpha][1]) for alpha in range(3)])
+        U23 = torch.stack([self.U_nu(v[alpha][1], v[alpha][2]) for alpha in range(3)])
+        U34 = torch.stack([self.U_nu(v[alpha][2], v[alpha][3]) for alpha in range(3)])
+        U41 = torch.stack([self.U_nu(v[alpha][3], v[alpha][0]) for alpha in range(3)])
         
-        # Sort e2, v2, e3, v3, e4, v4 based on similarity to e1, v1
-        # e2, v2 = self.sort_eig(e1, v1, e2, v2)
-        # e3, v3 = self.sort_eig(e1, v1, e3, v3)
-        # e4, v4 = self.sort_eig(e1, v1, e4, v4)
-        
-        # Compute U_nu for each edge
-        U12 = self.U_nu(v1, v2)
-        print('U12', U12)
-        U23 = self.U_nu(v2, v3)
-        print('U23', U23)
-        U34 = self.U_nu(v3, v4)
-        print('U34', U34)
-        U41 = self.U_nu(v4, v1)
-        print('U41', U41)
         # Compute F̂νp,α
-        product = U12 * U23 * U34 * U41
-        print('product', product)
-        F_hat = (1 / (2 * torch.pi * 1j)) * torch.log(product)
-        print('F_hat', F_hat)
+        F_hat = (1 / (2 * torch.pi * 1j)) * torch.log(U12 * U23 * U34 * U41)
         return F_hat.real
     
-    def cube(self, p, eigvals, eigvecs, N_div):
+    def cube(self, i, j, k, N_div, eigvals, eigvecs):
         """
-        Compute the cube function as defined in equation 4.3 of the paper.
+        Compute the cube function as defined in equation 4.3 of the paper for all bands simultaneously.
         
         Parameters:
-        p (torch.Tensor): Base point of the cube (can be a batch of vectors)
+        i, j, k (int): Indices of the base point of the cube
         eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
         eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
         N_div (int): Number of divisions in each dimension
@@ -922,117 +940,78 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         Returns:
         torch.Tensor: Cube function values for each band
         """
-        band = self.nx * self.ny
-        C_p = torch.zeros(band, dtype=torch.float64, device=self.device)
-        delta = 1/N_div
-        delta_space = delta * torch.pi * 2/self.a
-        delta_t = delta * self.T
-        # Define the displacement vectors
-        d = [torch.tensor([delta_space, 0, 0], dtype=torch.float64, device=p.device), 
-            torch.tensor([0, delta_space, 0], dtype=torch.float64, device=p.device), 
-            torch.tensor([0, 0, delta_t], dtype=torch.float64, device=p.device)]
-        # print(d)
-        for nu in range(band):
-            for alpha in range(3):
-                # Compute p + dα
-                p_plus_d = p + d[alpha]
-                
-                # Compute ˆFνp+dα,α
-                F_plus = self.face_F_hat(p_plus_d, alpha+1, eigvals, eigvecs, N_div)[nu]
-                
-                # Compute ˆFνp,α
-                F = self.face_F_hat(p, alpha+1, eigvals, eigvecs, N_div)[nu]
-                
-                # Add to the sum
-                C_p[nu] += F_plus - F
+        F_p = self.face_F_hat(i, j, k, N_div, eigvals, eigvecs)
+        
+        C_p = torch.zeros(F_p.shape[1], dtype=torch.float64, device=self.device)
+        
+        for alpha in range(3):
+            i_plus, j_plus, k_plus = i, j, k
+            if alpha == 0:
+                i_plus = (i + 1)
+            elif alpha == 1:
+                j_plus = (j + 1)
+            else:  # alpha == 2
+                k_plus = (k + 1)
+            
+            F_p_plus = self.face_F_hat(i_plus, j_plus, k_plus, N_div, eigvals, eigvecs)
+            
+            C_p -= F_p_plus[alpha] - F_p[alpha] # Modified (Deviated) from the algorithm in the paper
         
         C_p = torch.round(C_p)
+        
         if torch.sum(C_p) != 0:
-            print("Warning: The sum of the elements in C_p is non-zero.")
+            print(f"Warning: The sum of the elements in C_p is non-zero at cube ({i}, {j}, {k}).")
+        
         return C_p
     
-    def sort_eig(self, eigvals_ref, eigvecs_ref, eigvals, eigvecs):
-        """
-        Sort eigenvalues and eigenvectors based on the distance to reference eigenvalues.
-        Use eigenvector overlap only when eigenvalues are degenerate.
+    def determine_m(self, i, j, k, eigvals, eigvecs):
+        """Version 2
+        Determine m^nu_p,alpha for all alpha and all bands simultaneously
         
         Parameters:
-        eigvals_ref, eigvecs_ref: Reference eigenvalues and eigenvectors
-        eigvals, eigvecs: Eigenvalues and eigenvectors to be sorted
-        tol: Tolerance for considering eigenvalues as degenerate
-        
-        Returns:
-        Sorted eigenvalues and eigenvectors
-        """
-        distances = torch.abs(eigvals.unsqueeze(-2) - eigvals_ref.unsqueeze(-1))
-        indices = torch.argmin(distances, dim=-1)
-        
-        sorted_eigvals = torch.gather(eigvals, -1, indices)
-    
-        # Sort eigenvectors using the indices
-        expanded_indices = indices.unsqueeze(-2).expand(*eigvecs.shape[:-1], eigvecs.shape[-1])
-        sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
-        
-        return sorted_eigvals, sorted_eigvecs
-    
-    def determine_m(self, p, alpha, eigvals, eigvecs, N_div):
-        """
-        Determine m^nu_p,alpha such that |φ^nu_p - φ^nu_(p-δ_alpha) + 2πm^nu_p,alpha| < π
-        
-        Parameters:
-        p (torch.Tensor): Coordinate in parameter space (kx, ky, t)
-        alpha (int): Direction index (1, 2, or 3)
-        eigvals (torch.Tensor): Pre-computed -1j log(eigenvalues) from eigen_grid
+        i, j, k (int): Indices of the current point in parameter space
+        eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
         eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
-        N_div (int): Number of divisions in each dimension
         
         Returns:
-        torch.Tensor: m^nu_p,alpha
+        torch.Tensor: m^nu_p,alpha for all alphas and all bands, shape (3, num_bands)
         """
         # Get eigenvalues at p
-        phi_p, _ = self.S(p, eigvals, eigvecs, N_div)
-        # phi_p = -1j * torch.log(phi_p)
+        phi_p = eigvals[i, j, k]
         
-        # Calculate p - δ_alpha
-        p_minus_delta = p.clone()
-        delta = 1/N_div
-        delta_space = delta * torch.pi * 2/self.a
-        delta_t = delta * self.T
-        if alpha == 1 or alpha == 2:
-            p_minus_delta[alpha-1] -= delta_space
-        else:
-            p_minus_delta[alpha-1] -= delta_t
+        # Calculate indices for p - δ_alpha for all three directions
+        indices_minus = torch.tensor([
+            [(i - 1), j, k],
+            [i, (j - 1), k],
+            [i, j, (k - 1)]], dtype=torch.long, device=self.device)
+            
+        # Get eigenvalues at p - δ_alpha for all directions
+        phi_p_minus_delta = eigvals[indices_minus[:, 0], indices_minus[:, 1], indices_minus[:, 2]]
+
+        # Calculate the difference for all directions
+        diff = (phi_p - phi_p_minus_delta)
         
-        # Get eigenvalues at p - δ_alpha
-        phi_p_minus_delta, _ = self.S(p_minus_delta, eigvals, eigvecs, N_div)
-        # e_p_minus_delta, _ = self.sort_eig(e_p, None, e_p_minus_delta, None)
-        # phi_p_minus_delta = -1j * torch.log(phi_p_minus_delta)
-        
-        # Calculate the difference
-        diff = phi_p - phi_p_minus_delta
-        
-        # Determine m
+        # Determine m for all alphas and all bands
         m = - torch.floor((diff + torch.pi) / (2 * torch.pi))
-        
+        # print(m)
         return m.long()
         
-    def determine_M(self, p, eigvals, eigvecs, N_div, C_p):
-        """
+    def determine_M(self, i, j, k, eigvals, C_p):
+        """Version 2
         Determine M^ν_p when Ĉ^ν_p ≠ 0 for two indices ν, ν'
         
         Parameters:
-        p (torch.Tensor): Coordinate in parameter space (kx, ky, t)
+        i, j, k (int): Indices of the current point in parameter space
         eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
         eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
-        N_div (int): Number of divisions in each dimension
         C_p (torch.Tensor): Ĉ^ν_p values
         
         Returns:
-        torch.Tensor: M^ν_p values
+        torch.Tensor: M^ν_p values for all bands
         """
         ## Get eigenvalues at p
-        phi_p, _ = self.S(p, eigvals, eigvecs, N_div)
-        # phi_p = -1j * torch.log(phi_p)
+        # Get eigenvalues at p
+        phi_p = eigvals[i, j, k]
         
         M_p = torch.zeros_like(C_p)
         non_zero_indices = torch.nonzero(C_p).squeeze()
@@ -1046,9 +1025,159 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         
         return M_p
         
+    def w3(self, N_div, steps_per_segment, delta=None, reverse=False):
+        eigvals, _, eigvecs = self.eigen_grid(N_div, steps_per_segment, pbc="xy")
+        n_band = self.nx * self.ny
+        w3 = 0
+        delta = 1/N_div
+        delta_space = delta * torch.pi * 2 / self.a
+        delta_t = delta * self.T
+        for i in range(N_div-1):
+            for j in range(N_div-1): 
+                for k in range(N_div-1): 
+                    # print(r"($i_1, i_2, i_3$)", i+1,j+1,k+1)
+                    p = torch.tensor([delta_space * (i+1), delta_space * (j+1), delta_t * (k+1)], dtype=torch.float64, device=self.device)
+                    # print('p', p)
+                    C_p = self.cube(i+1, j+1, k+1, N_div, eigvals, eigvecs)
+                    # print(r'$C_p$', C_p)
+                    M_p = self.determine_M(i+1, j+1, k+1, eigvals, C_p)
+                    # print(r'$M_p$', M_p)
+                    F_p = self.face_F_hat(i+1, j+1, k+1, N_div, eigvals, eigvecs)
+                    m_p = self.determine_m(i+1, j+1, k+1, eigvals, eigvecs)
+                    # if torch.all(C_p != 0):
+                    #     print(f"($i_1, i_2, i_3$)", i+1,j+1,k+1)
+                    #     print('p', p)
+                    #     print(f'$C_p$', C_p)
+                    #     print(f'$M_p$', M_p)
+                    #     print(f'$F_p$', F_p)
+                    #     print("\n")
+                    # Update W3
+                    w3 += torch.sum(C_p * M_p) + torch.sum(F_p * m_p)
+        return w3
+    
+    def log_with_branch_cut(self, z, branch_cut_angle=0):
+        # Ensure the branch cut angle is a tensor
+        if not isinstance(branch_cut_angle, torch.Tensor):
+            branch_cut_angle = torch.tensor([branch_cut_angle], dtype=torch.float64, device=z.device)
+        else:
+            # Ensure branch_cut_angle is on the same device as z
+            branch_cut_angle = branch_cut_angle.to(device=z.device, dtype=torch.float64)
+        # Step 1: Compute the magnitude of z
+        magnitude = torch.abs(z)
+        # Step 2: Compute the initial phase
+        initial_phase = torch.angle(z)
         
-    # def w3(self, N_div, steps_per_segment, delta=None, reverse=False):
+        # Normalize the branch_cut_angle to be within [-pi, pi)
+        branch_cut_angle = (branch_cut_angle + torch.pi) % (2 * torch.pi) - torch.pi
+
+        # Step 3: Adjust phase to be within [branch_cut_angle, branch_cut_angle + 2*pi)
+        adjusted_phase = initial_phase.unsqueeze(-1) - branch_cut_angle
+        adjusted_phase = (adjusted_phase + torch.pi) % (2 * torch.pi) - torch.pi  # Normalize to [-pi, pi)
+        adjusted_phase += branch_cut_angle  # Shift back to the desired range
+
+        # Correct phases that are not within the specified range
+        adjusted_phase += torch.where(adjusted_phase < branch_cut_angle, 2 * torch.pi, 0)
+        adjusted_phase -= torch.where(adjusted_phase >= branch_cut_angle + 2 * torch.pi, 2 * torch.pi, 0)
+
+        # Step 4: Compute the logarithm using the new angle and magnitude
+        log_z = torch.log(magnitude).unsqueeze(-1) + 1j * adjusted_phase
         
+        return log_z
+    
+    def determine_K(self, i, j, k, eigvals, eigvecs, branch_cut_angle):
+        """
+        Determine K^ν_(i,j) such that |-i log_ξ d^ν(p) - φ^ν_p + 2πK^ν_(i,j)| < π at i3 = N for all bands simultaneously
+
+        Parameters:
+        i, j, k (int): Indices of the current point in parameter space
+        eigvals (torch.Tensor): Pre-computed eigenvalues from eigen_grid
+        eigvecs (torch.Tensor): Pre-computed eigenvectors from eigen_grid
+        branch_cut_angle (float): Angle for the branch cut in radians
+
+        Returns:
+        torch.Tensor: K^ν_(i,j) values for all bands
+        """
+        # Get eigenvalues at p
+        d_p = eigvals[i, j, k]
+        # Compute φ^ν_p using -i log(d^nu_p)
+        phi_p = -1j * torch.log(d_p)
+        # print("without branch cut",phi_p)
+        # Compute -i log_ξ d^ν(p) using the provided branch cut angle
+        log_xi_d = -1j * self.log_with_branch_cut(d_p, branch_cut_angle)
+        # print('with branch cut', log_xi_d)
+        # Compute the difference
+        # Handle both scalar and tensor branch_cut_angle
+        if log_xi_d.dim() > phi_p.dim():
+            diff = log_xi_d - phi_p.unsqueeze(-1)
+        else:
+            diff = log_xi_d - phi_p
+        # print("diff", diff)
+        # Determine K
+        K = -torch.floor((diff.real + torch.pi) / (2 * torch.pi))
+        
+        return K.long()
+    
+    def winding3(self, N_div, steps_per_segment, branch_cut_angle, plot=False, delta=None, reverse=False):
+        w3 = self.w3(N_div, steps_per_segment, delta, reverse)
+        print(w3)
+        # 1. Calculate the ξ-dependent correction term for W3[Uξ].
+        _, eigvals, eigvecs = self.eigen_grid(N_div, steps_per_segment, pbc="xy")
+        # Initialize correction_term based on branch_cut_angle type
+        if isinstance(branch_cut_angle, torch.Tensor):
+            correction_term = torch.zeros(len(branch_cut_angle), device=self.device)
+        else:
+            correction_term = 0
+        
+        # Iterate over the 2D grid at μ3 = 1 (i3 = N_div)
+        for i1 in range(N_div):
+            for i2 in range(N_div):
+                # print(r"($i_1, i_2, i_3$)", i1+1,i2+1)
+                # Compute the base point p
+                p = torch.tensor([(i1+1) * 2*torch.pi/(self.a * N_div),
+                                (i2+1) * 2*torch.pi/(self.a * N_div),
+                                self.T], dtype=torch.float64, device=self.device)
+                # print('p', p)
+                # Compute F^ν_p,3
+                vertices = torch.tensor([
+                    [(i1+1)%N_div, (i2+1)%N_div, N_div],
+                    [(i1+2)%N_div, (i2+1)%N_div, N_div],
+                    [(i1+2)%N_div, (i2+2)%N_div, N_div],
+                    [(i1+1)%N_div, (i2+2)%N_div, N_div]
+                ], dtype=torch.long, device=self.device)
+                # print(vertices)
+                # Compute F^ν_p,3 using these vertices
+                v = [eigvecs[tuple(v)] for v in vertices]
+                U12 = self.U_nu(v[0], v[1])
+                U23 = self.U_nu(v[1], v[2])
+                U34 = self.U_nu(v[2], v[3])
+                U41 = self.U_nu(v[3], v[0])
+                F_p_3 = (- 1 / (2 * torch.pi * 1j)) * torch.log(U12 * U23 * U34 * U41)
+                F_p_3 = F_p_3.real
+                # print(F_p_3)
+                # Determine K^ν_(i,j)
+                K = self.determine_K(i1+1, i2+1, N_div, eigvals, eigvecs, branch_cut_angle)
+                # print(K)
+                # Compute the product and sum over bands
+                # Handle both scalar and tensor branch_cut_angle
+                if isinstance(branch_cut_angle, torch.Tensor):
+                    term = torch.sum(F_p_3.unsqueeze(-1) * K, dim=0)
+                else:
+                    term = torch.sum(F_p_3 * K)
+                
+                # Add to the correction term
+                correction_term += term
+        print(correction_term)
+        W3_U_xi = (w3 + correction_term) / 2
+        if plot:
+            # Plot for multiple branch cut angles
+            plt.figure(figsize=(10, 6))
+            plt.plot(branch_cut_angle.cpu().numpy(), W3_U_xi.cpu().numpy(), '-o')
+            plt.xlabel('Branch Cut Angle')
+            plt.ylabel('$W_{3}[U_{\\xi}]$')
+            # plt.title('Winding Number vs Branch Cut Angle')
+            plt.grid(True)
+            plt.show()
+        return W3_U_xi
         
     
 class tb_floquet_tbc_cuda(nn.Module):
