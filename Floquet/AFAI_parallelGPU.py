@@ -424,14 +424,10 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         return U
     
     def time_evolution_operator_pbc1(self, t, steps_per_segment, kx, ky, pbc, delta=None, reverse=False):
-        '''Time evolution operator for time 0 ≤ t ≤ T with a specified number of steps per T/5 segment'''
+        '''Time evolution operator for time not limited only to 0 ≤ t ≤ T but for all t with a specified number of steps per T/5 segment'''
         '''Support not only scalar (kx, ky, t) pair
         but also batch processing for multiple (kx, ky, t) pairs: vectorization of kx, ky, and t: 1D tensors
         the output shape is then (N_kx, N_ky, N_t, nx*ny, nx*ny)'''
-        
-        if delta is None:
-            delta = self.delta_AB
-        
         # Determine if inputs are batched
         is_batch = isinstance(kx, torch.Tensor) and isinstance(ky, torch.Tensor) and kx.dim() + ky.dim() > 1
 
@@ -787,9 +783,9 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             z = sorted_eigv_r[:, :, frame].cpu().numpy()
             for i in range(z.shape[-1]):
                 ax1.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
-            ax1.set_xlabel('k_x')
-            ax1.set_ylabel('k_y')
-            ax1.set_zlabel('Quasienergy')
+            ax1.set_xlabel(r'$k_x$')
+            ax1.set_ylabel(r'$k_y$')
+            ax1.set_zlabel(r'$T\epsilon$')
             ax1.set_title(f'Time Shot: {frame}')
             ax1.set_zlim(-torch.pi, torch.pi)
             ax1.view_init(elev=2, azim=5)
@@ -1178,8 +1174,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             plt.grid(True)
             plt.show()
         return W3_U_xi
-        
-    
+
 class tb_floquet_tbc_cuda(nn.Module):
     def __init__(self, period, lattice_constant, J_coe, ny, nx=2, device=None):
         super(tb_floquet_tbc_cuda, self).__init__()
@@ -1210,16 +1205,26 @@ class tb_floquet_tbc_cuda(nn.Module):
     
     def Hamiltonian_tbc1(self, theta_y, tbc='y'):
         """The time-independent Hamiltonian H1 for t < T/5 with twisted boundary conditions in either x, y, or both x and y directions in the real space"""
-        H1 = torch.zeros((self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        if isinstance(theta_y, (int, float)):
+            theta_y = torch.tensor([theta_y], device=self.device)
+        elif not isinstance(theta_y, torch.Tensor):
+            theta_y = torch.tensor(theta_y, device=self.device)
+        else:
+            theta_y = theta_y.to(self.device)
+        is_batch = theta_y.dim() > 1 or (theta_y.dim() == 1 and theta_y.shape[0] > 1)
+        batch_size = theta_y.shape[0] if is_batch else 1
+        theta_y = theta_y.view(batch_size, 1, 1)
+        size = self.nx * self.ny
+        H1 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
 
         if self.nx % 2 == 1:  # odd nx
-            for i in range(self.nx * self.ny):
+            for i in range(size):
                 a = 2 * i
                 b = self.nx + 2 * i
-                if b < self.nx * self.ny:
-                    H1[a, b] = -J_coe_tensor
-                    H1[b, a] = -J_coe_tensor.conj()
+                if b < size:
+                    H1[:, a, b] = -J_coe_tensor
+                    H1[:, b, a] = -J_coe_tensor.conj()
         else:  # Even nx
             based_pairs = torch.zeros((self.nx, 2), device=self.device)
             based_pairs[0] = torch.tensor([0, self.nx], device=self.device)
@@ -1231,43 +1236,46 @@ class tb_floquet_tbc_cuda(nn.Module):
                 based_pairs[j] = based_pairs[j - 1] + increment
 
             for a, b in based_pairs:
-                while a < self.nx * self.ny and b < self.nx * self.ny:
-                    H1[int(a), int(b)] = -J_coe_tensor
-                    H1[int(b), int(a)] = -J_coe_tensor.conj()
+                while a < size and b < size:
+                    H1[:, int(a), int(b)] = -J_coe_tensor
+                    H1[:, int(b), int(a)] = -J_coe_tensor.conj()
                     a += 2 * self.nx
                     b += 2 * self.nx
-
         # For the twisted boundary in the y direction
         if tbc == 'y' or tbc == 'xy':
             p = 0
+            phase = torch.exp(1j * theta_y).squeeze()
             while 1 + 2 * p < self.nx and self.ny % 2 == 0:
                 a = 1 + self.nx * (self.ny - 1) + 2 * p
                 b = 1 + 2 * p
-                # Check if theta_y is already a tensor and just clone it if it's on the correct device
-                if isinstance(theta_y, torch.Tensor) and theta_y.device == self.device:
-                    theta_y_tensor1 = theta_y.clone().detach()
-                else:
-                    # If it's not a tensor or not on the correct device, properly convert it
-                    theta_y_tensor1 = torch.tensor(theta_y, dtype=torch.float, device=self.device)
-                H1[int(a), int(b)] = -J_coe_tensor * torch.exp(1j * theta_y_tensor1)
-                H1[int(b), int(a)] = -J_coe_tensor * torch.exp(-1j * theta_y_tensor1)
+                H1[:, int(a), int(b)] = -J_coe_tensor * phase
+                H1[:, int(b), int(a)] = -J_coe_tensor * phase.conj()
                 p += 1
-        return H1
+        return H1.squeeze() if not is_batch else H1
     
     def Hamiltonian_tbc2(self, theta_x, tbc='x'):
         '''The time-independent Hamiltonian H2 for T/5 <= t < 2T/5 with twisted boundary conditions in either x, y, or both x and y directions in the real space'''
-        H2 = torch.zeros((self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        if isinstance(theta_x, (int, float)):
+            theta_x = torch.tensor([theta_x], device=self.device)
+        elif not isinstance(theta_x, torch.Tensor):
+            theta_x = torch.tensor(theta_x, device=self.device)
+        else:
+            theta_x = theta_x.to(self.device)
+        is_batch = theta_x.dim() > 1 or (theta_x.dim() == 1 and theta_x.shape[0] > 1)
+        batch_size = theta_x.shape[0] if is_batch else 1
+        theta_x = theta_x.view(batch_size, 1, 1)
+        size = self.nx * self.ny
+        H2 = torch.zeros((batch_size , size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
-
         n = 1
         a = -1
         b = 0
-        while n <= self.ny and a < self.nx * self.ny - 1 and b < self.nx * self.ny:
+        while n <= self.ny and a < size - 1 and b < size:
             a += 2
             b += 2
             if b < n * self.nx:
-                H2[a, b] = -J_coe_tensor
-                H2[b, a] = -J_coe_tensor.conj()
+                H2[:, a, b] = -J_coe_tensor
+                H2[:, b, a] = -J_coe_tensor.conj()
             else:
                 n += 1
                 if self.nx % 2 == 1 and n % 2 == 0:
@@ -1279,110 +1287,114 @@ class tb_floquet_tbc_cuda(nn.Module):
                 elif self.nx % 2 == 0:
                     a += 1
                     b += 1
-                if a < self.nx * self.ny - 1 and b < self.nx * self.ny:
-                    H2[a, b] = -J_coe_tensor
-                    H2[b, a] = -J_coe_tensor.conj()
+                if a < size - 1 and b < size:
+                    H2[:, a, b] = -J_coe_tensor
+                    H2[:, b, a] = -J_coe_tensor.conj()
             if self.nx == 2:
                 a += 1
                 b += 1
             if b >= self.ny * self.nx - 2:
                 break
-
         # For the twisted boundary in the x direction
         if tbc == 'x' or tbc == 'xy':
             p = 0
-            while self.nx - 1 + 2 * self.nx * p < self.nx * self.ny and self.nx % 2 == 0:
+            phase = torch.exp(1j * theta_x).squeeze()
+            while self.nx - 1 + 2 * self.nx * p < size and self.nx % 2 == 0:
                 a = self.nx - 1 + 2 * self.nx * p
                 b = 2 * self.nx * p
-                # Check if theta_x is already a tensor and just clone it if it's on the correct device
-                if isinstance(theta_x, torch.Tensor) and theta_x.device == self.device:
-                    theta_x_tensor2 = theta_x.clone().detach()
-                else:
-                    # If it's not a tensor or not on the correct device, properly convert it
-                    theta_x_tensor2 = torch.tensor(theta_x, dtype=torch.float, device=self.device)
-                H2[a, b] = -J_coe_tensor * torch.exp(1j * theta_x_tensor2)
-                H2[b, a] = -J_coe_tensor * torch.exp(-1j * theta_x_tensor2)
+                H2[:, a, b] = -J_coe_tensor * phase
+                H2[:, b, a] = -J_coe_tensor * phase.conj()
                 p += 1
-
-        return H2
+        return H2.squeeze() if not is_batch else H2
     
     def Hamiltonian_tbc3(self, theta_y, tbc='y'):
         '''The time-independent Hamiltonian H3 for 2T/5 <= t < 3T/5 with twisted boundary conditions in either x, y, or both x and y directions in the real space'''
-        H3 = torch.zeros((self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        if isinstance(theta_y, (int, float)):
+            theta_y = torch.tensor([theta_y], device=self.device)
+        elif not isinstance(theta_y, torch.Tensor):
+            theta_y = torch.tensor(theta_y, device=self.device)
+        else:
+            theta_y = theta_y.to(self.device)
+        is_batch = theta_y.dim() > 1 or (theta_y.dim() == 1 and theta_y.shape[0] > 1)
+        batch_size = theta_y.shape[0] if is_batch else 1
+        theta_y = theta_y.view(batch_size, 1, 1)
+        size = self.nx * self.ny
+        H3 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
-
         if self.nx % 2 == 1:  # odd nx
-            for i in range(self.nx * self.ny):
+            for i in range(size):
                 a = 2 * i + 1
                 b = self.nx + 2 * i + 1
-                if b < self.nx * self.ny:
-                    H3[a, b] = -J_coe_tensor
-                    H3[b, a] = -J_coe_tensor.conj()
+                if b < size:
+                    H3[:, a, b] = -J_coe_tensor
+                    H3[:, b, a] = -J_coe_tensor.conj()
         else:  # Even nx
             n = 1
             a = 1
             b = 1 + self.nx
-            if b < self.nx * self.ny:
-                H3[a, b] = -J_coe_tensor
-                H3[b, a] = -J_coe_tensor.conj()
-            while n < self.ny and a < self.nx * self.ny - 1 and b < self.nx * self.ny - 1:
+            if b < size:
+                H3[:, a, b] = -J_coe_tensor
+                H3[:, b, a] = -J_coe_tensor.conj()
+            while n < self.ny and a < size - 1 and b < size - 1:
                 a += 2
                 b += 2
                 if a < n * self.nx:
-                    H3[a, b] = -J_coe_tensor
-                    H3[b, a] = -J_coe_tensor.conj()
+                    H3[:, a, b] = -J_coe_tensor
+                    H3[:, b, a] = -J_coe_tensor.conj()
                 else:
                     n += 1
                     if n % 2 == 0:  # even n
                         a -= 1
                         b -= 1
-                    elif n % 2 != 0 and b < self.nx * self.ny - 1:  # odd n
+                    elif n % 2 != 0 and b < size - 1:  # odd n
                         a += 1
                         b += 1
                     else:
                         a -= 2
                         b -= 2
-                    H3[a, b] = -J_coe_tensor
-                    H3[b, a] = -J_coe_tensor.conj()
-
+                    H3[:, a, b] = -J_coe_tensor
+                    H3[:, b, a] = -J_coe_tensor.conj()
         # For the twisted boundary in the y direction
         if tbc == 'y' or tbc == 'xy':
             p = 0
             while 2 * p < self.nx and self.ny % 2 == 0:
                 a = self.nx * (self.ny - 1) + 2 * p
                 b = 2 * p
-                # Check if theta_y is already a tensor and just clone it if it's on the correct device
-                if isinstance(theta_y, torch.Tensor) and theta_y.device == self.device:
-                    theta_y_tensor3 = theta_y.clone().detach()
-                else:
-                    # If it's not a tensor or not on the correct device, properly convert it
-                    theta_y_tensor3 = torch.tensor(theta_y, dtype=torch.float, device=self.device)
-                H3[int(a), int(b)] = -J_coe_tensor * torch.exp(1j * theta_y_tensor3)
-                H3[int(b), int(a)] = -J_coe_tensor * torch.exp(-1j * theta_y_tensor3)
+                phase = torch.exp(1j * theta_y).squeeze()
+                H3[:, int(a), int(b)] = -J_coe_tensor * phase
+                H3[:, int(b), int(a)] = -J_coe_tensor * phase.conj()
                 p += 1
-
-        return H3
+        return H3.squeeze() if not is_batch else H3
 
     def Hamiltonian_tbc4(self, theta_x, tbc='x'):
         '''The time-independent Hamiltonian H4 for 3T/5 <= t < 4T/5 with twisted boundary conditions in either x, y, or both x and y directions in the real space'''
-        H4 = torch.zeros((self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        if isinstance(theta_x, (int, float)):
+            theta_x = torch.tensor([theta_x], device=self.device)
+        elif not isinstance(theta_x, torch.Tensor):
+            theta_x = torch.tensor(theta_x, device=self.device)
+        else:
+            theta_x = theta_x.to(self.device)
+        is_batch = theta_x.dim() > 1 or (theta_x.dim() == 1 and theta_x.shape[0] > 1)
+        batch_size = theta_x.shape[0] if is_batch else 1
+        theta_x = theta_x.view(batch_size, 1, 1)
+        size = self.nx * self.ny
+        H4 = torch.zeros((batch_size, size, size), dtype=torch.cdouble, device=self.device)
         J_coe_tensor = torch.tensor(self.J_coe, dtype=torch.cdouble, device=self.device)
-
         n = 1
         a = -2
         b = -1
-        while n <= self.ny and a < self.nx * self.ny - 2 and b < self.nx * self.ny - 2:
+        while n <= self.ny and a < size - 2 and b < size - 2:
             a += 2
             b += 2
             if b < n * self.nx:
-                H4[a, b] = -J_coe_tensor
-                H4[b, a] = -J_coe_tensor.conj()
+                H4[:, a, b] = -J_coe_tensor
+                H4[:, b, a] = -J_coe_tensor.conj()
             else:
                 n += 1
                 if self.nx % 2 == 0 and self.nx != 2:  # even nx
                     a += 1
                     b += 1
-                elif self.nx % 2 == 0 and self.nx == 2 and b < self.nx * self.ny - 2:  # even nx and nx = 2
+                elif self.nx % 2 == 0 and self.nx == 2 and b < size - 2:  # even nx and nx = 2
                     a += 2
                     b += 2
                     n += 1
@@ -1396,33 +1408,28 @@ class tb_floquet_tbc_cuda(nn.Module):
                     n += 1
                     a += -2
                     b += -2
-                H4[a, b] = -J_coe_tensor
-                H4[b, a] = -J_coe_tensor.conj()
+                H4[:, a, b] = -J_coe_tensor
+                H4[:, b, a] = -J_coe_tensor.conj()
 
         # For the twisted boundary in the x direction
         if tbc == 'x' or tbc == 'xy':
             p = 0
-            while 2 * self.nx * (1 + p) - 1 < self.nx * self.ny and self.nx % 2 == 0:
+            while 2 * self.nx * (1 + p) - 1 < size and self.nx % 2 == 0:
                 a = 2 * self.nx * (1 + p) - 1
                 b = 2 * self.nx * p + self.nx
-                # Check if theta_x is already a tensor and just clone it if it's on the correct device
-                if isinstance(theta_x, torch.Tensor) and theta_x.device == self.device:
-                    theta_x_tensor4 = theta_x.clone().detach()
-                else:
-                    # If it's not a tensor or not on the correct device, properly convert it
-                    theta_x_tensor4 = torch.tensor(theta_x, dtype=torch.float, device=self.device)
-                H4[a, b] = -J_coe_tensor * torch.exp(1j * theta_x_tensor4)
-                H4[b, a] = -J_coe_tensor * torch.exp(-1j * theta_x_tensor4)
+                phase = torch.exp(1j * theta_x).squeeze()
+                H4[:, a, b] = -J_coe_tensor * phase
+                H4[:, b, a] = -J_coe_tensor * phase.conj()
                 p += 1
-
-        return H4
+        return H4.squeeze() if not is_batch else H4
     
     def aperiodic_Honsite(self, vd, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, contourplot=False, save_path=None):
         '''Adding aperiodic potential to the onsite Hamiltonian'''
         '''The extra phi1_ex and phi2_ex is for the convenience of adding extra phase to the potential'''
-        
         # Convert vd to a tensor if it's not already one, using the recommended method
-        if not isinstance(vd, torch.Tensor):
+        if isinstance(vd, (int, float)):
+            vd = torch.tensor([vd], device=self.device)
+        elif not isinstance(vd, torch.Tensor):
             vd = torch.tensor(vd, device=self.device)
         else:
             vd = vd.to(self.device)
@@ -1460,6 +1467,7 @@ class tb_floquet_tbc_cuda(nn.Module):
             H_ap = H_aperiodic[0].diag().cpu().numpy().reshape(self.ny, self.nx).real
             plt.figure(figsize=(8, 6))
             norm = plt.Normalize(np.min(H_ap), np.max(H_ap))
+            # print(np.min(H_ap), np.max(H_ap))
             cmap = plt.get_cmap('viridis')
             plt.imshow(H_ap, cmap=cmap, norm=norm, interpolation='nearest', origin='upper')
 
@@ -1469,15 +1477,24 @@ class tb_floquet_tbc_cuda(nn.Module):
             cbar = plt.colorbar(aspect=50)
             cbar.set_label(r'$V_{\mathbf{r}}T$', fontsize=fontsize)
 
-            # Get the current tick labels
+            # Get the current tick labels and locations
             tick_labels = cbar.ax.get_yticklabels()
+            tick_locations = cbar.ax.get_yticks()
 
-            # Multiply the tick labels by self.T
-            new_tick_labels = [float(tick.get_text().replace('−', '-')) * self.T for tick in tick_labels]
+            # Prepare new tick labels
+            new_tick_labels = []
+            for tick in tick_labels:
+                try:
+                    # Attempt to convert tick text, handle possible formatting issues
+                    label_value = float(tick.get_text().replace('−', '-').replace('−', '-'))
+                    new_tick_labels.append(label_value * self.T)
+                except ValueError:
+                    # Handle possible conversion errors
+                    new_tick_labels.append(0)  # Default to 0 or some suitable fallback value
 
             # Set the tick positions and labels on the colorbar
-            cbar.ax.set_yticks(cbar.ax.get_yticks())  # Set the tick positions explicitly
-            cbar.ax.set_yticklabels([f'{label:.3f}' for label in new_tick_labels])
+            cbar.ax.set_yticks(tick_locations)  # Ensure ticks are set with FixedLocator
+            cbar.ax.set_yticklabels([f'{label:.3f}' for label in new_tick_labels])  # Set tick labels
 
             cbar.ax.tick_params(labelsize=ticksize)
 
@@ -1494,10 +1511,9 @@ class tb_floquet_tbc_cuda(nn.Module):
             if save_path:
                 plt.savefig(save_path, format='pdf', bbox_inches='tight')
             plt.show()
-
-            return H_aperiodic, H_ap
+            return H_aperiodic.squeeze(), H_ap
         else:
-            return H_aperiodic
+            return H_aperiodic.squeeze()
     
     def check_diagonal_symmetry(self, H_ap):
         """
@@ -1523,9 +1539,10 @@ class tb_floquet_tbc_cuda(nn.Module):
     
     def Hamiltonian_disorder(self, vd, contourplot=False, initialise=False, save_path=None):
         '''The disorder Hamiltonian adding random onsite potential to the total Hamiltonian for which is uniformly distributed in the range (-vd, vd)'''
-        
         # Convert vd to a tensor if it's not already one, using the recommended method
-        if not isinstance(vd, torch.Tensor):
+        if isinstance(vd, (int, float)):
+            vd = torch.tensor([vd], device=self.device)
+        elif not isinstance(vd, torch.Tensor):
             vd = torch.tensor(vd, device=self.device)
         else:
             vd = vd.to(self.device)
@@ -1554,14 +1571,16 @@ class tb_floquet_tbc_cuda(nn.Module):
             cbar = plt.colorbar(aspect=50)
             cbar.set_label(r'$V_{\mathbf{r}}T$', fontsize=fontsize)
             
-            # Get the current tick labels
+            # Get the current tick labels and locations
             tick_labels = cbar.ax.get_yticklabels()
+            tick_locations = cbar.ax.get_yticks()
 
             # Multiply the tick labels by self.T
             new_tick_labels = [float(tick.get_text().replace('−', '-')) * self.T for tick in tick_labels]
 
             # Set the new tick labels on the colorbar
-            cbar.ax.set_yticklabels([f'{label:.3f}' for label in new_tick_labels])
+            cbar.ax.set_yticks(tick_locations)  # Set tick locations
+            cbar.ax.set_yticklabels([f'{label:.3f}' for label in new_tick_labels])  # Set tick labels
 
             cbar.ax.tick_params(labelsize=ticksize)
             plt.xlabel('X', fontsize=fontsize)
@@ -1570,20 +1589,18 @@ class tb_floquet_tbc_cuda(nn.Module):
             # Change font size of x and y tick labels
             x_ticks = np.arange(0, self.nx, 4)
             y_ticks = np.arange(0, self.ny, 4)
-            plt.xticks(x_ticks,fontsize=ticksize)
-            plt.yticks(y_ticks,fontsize=ticksize)
+            plt.xticks(x_ticks, fontsize=ticksize)
+            plt.yticks(y_ticks, fontsize=ticksize)
             plt.tight_layout()
             
             if save_path:
                 plt.savefig(save_path, format='pdf', bbox_inches='tight')
             plt.show()
-
-        return disorder_matrix
+        return disorder_matrix.squeeze()
     
     def Hamiltonian_onsite(self, vd, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, contourplot=False):
         '''The time-independent Hamiltonian H5 for 4T/5 <= t < T with twisted boundary conditions in either x, y, or both x and y directions in the real space'''
         size = self.nx * self.ny
-
         # Convert vd to a tensor if it's not already one
         if not isinstance(vd, torch.Tensor):
             vd = torch.tensor(vd, device=self.device)
@@ -1617,10 +1634,8 @@ class tb_floquet_tbc_cuda(nn.Module):
         else:
             rotation_angle_tensor = torch.tensor(rotation_angle, device=self.device)  # Convert to tensor
             H_dis = self.aperiodic_Honsite(vd, rotation_angle_tensor, a, b, phi1_ex, phi2_ex, contourplot=contourplot)
-
         H5 = H_onsite + H_dis
-
-        return H5
+        return H5.squeeze()
     
     def Hamiltonian_tbc(self, t, tbc, vd, rotation_angle, theta_x, theta_y, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
         """The Hamiltonian H(t) with twisted boundary conditions in either x, y, or both x and y directions in the real space """
@@ -1628,37 +1643,38 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Ensure t is within [0, T)
         t = t % self.T
 
-        # Convert vd to a tensor if it's not already one
-        if not isinstance(vd, torch.Tensor):
-            vd = torch.tensor(vd, device=self.device)
-        else:
-            vd = vd.to(self.device)
+        # Convert inputs to tensors and move them to the correct device
+        vd = torch.as_tensor(vd, device=self.device).reshape(-1, 1, 1, 1, 1)
+        theta_x = torch.as_tensor(theta_x, device=self.device).reshape(1, -1, 1, 1, 1)
+        theta_y = torch.as_tensor(theta_y, device=self.device).reshape(1, 1, -1, 1, 1)
+        rotation_angle = torch.as_tensor(rotation_angle, device=self.device)
 
-        # Reshape vd for broadcasting
-        vd = vd.reshape(-1, 1, 1)
+        size = self.nx * self.ny
 
-        H_onsite = self.Hamiltonian_onsite(vd, rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
+        # Compute H_onsite
+        H_onsite = self.Hamiltonian_onsite(vd.squeeze(), rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
+        H_onsite = H_onsite.view(vd.shape[0], 1, 1, size, size)
 
-        # Assume Hamiltonian_tbc1, Hamiltonian_tbc2, Hamiltonian_tbc3, Hamiltonian_tbc4 return tensors
-        # that can be broadcast with H_onsite
+        # Compute H_tbc based on the time t
         if t < self.T/5:
-            H_tbc = self.Hamiltonian_tbc1(theta_y, tbc)
-        elif self.T/5 <= t < 2 * self.T/5:
-            H_tbc = self.Hamiltonian_tbc2(theta_x, tbc)
-        elif 2 * self.T/5 <= t < 3 * self.T/5:
-            H_tbc = self.Hamiltonian_tbc3(theta_y, tbc)
-        elif 3 * self.T/5 <= t < 4 * self.T/5:
-            H_tbc = self.Hamiltonian_tbc4(theta_x, tbc)
-        else:  # 4 * self.T/5 <= t < self.T
-            H_tbc = 0
+            H_tbc = self.Hamiltonian_tbc1(theta_y.squeeze(), tbc)
+            H_tbc = H_tbc.view(1, 1, -1, size, size)
+        elif self.T/5 <= t < 2*self.T/5:
+            H_tbc = self.Hamiltonian_tbc2(theta_x.squeeze(), tbc)
+            H_tbc = H_tbc.view(1, -1, 1, size, size)
+        elif 2*self.T/5 <= t < 3*self.T/5:
+            H_tbc = self.Hamiltonian_tbc3(theta_y.squeeze(), tbc)
+            H_tbc = H_tbc.view(1, 1, -1, size, size)
+        elif 3*self.T/5 <= t < 4*self.T/5:
+            H_tbc = self.Hamiltonian_tbc4(theta_x.squeeze(), tbc)
+            H_tbc = H_tbc.view(1, -1, 1, size, size)
+        else:  # 4*self.T/5 <= t < self.T
+            H_tbc = torch.zeros(1, 1, 1, size, size, dtype=torch.cdouble, device=self.device)
 
-        # Add H_tbc to all elements in the batch
-        if H_tbc != 0:
-            H = H_tbc + H_onsite
-        else:
-            H = H_onsite
+        # Add H_tbc to H_onsite and broadcast to final shape
+        H = (H_onsite + H_tbc).expand(vd.shape[0], theta_x.shape[1], theta_y.shape[2], size, size)
 
-        return H
+        return H.squeeze()
     
     def time_evolution_operator(self, t, tbc, vd, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
         '''The time evolution operator U(t) = exp(-iH(t))
@@ -1704,81 +1720,263 @@ class tb_floquet_tbc_cuda(nn.Module):
             U4 = torch.matrix_exp(-1j * (self.T/5) * H4)
             U5 = torch.matrix_exp(-1j * (t - 4 * self.T/5) * H5)
             U = U5 @ U4 @ U3 @ U2 @ U1
-
         return U
     
-    def time_evolution_operator1(self, t, steps_per_segment, tbc, vd, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True):
+    def time_evolution_operator1(self, t, steps_per_segment, tbc, vd, rotation_angle, theta_x, theta_y, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True):
         '''Time evolution operator for time t ≤ T with a specified number of steps per T/5 segment'''
-        
-        # Handle both scalar and tensor vd
-        if isinstance(vd, (int, float)):
-            vd = torch.tensor([vd], device=self.device)
-        elif not isinstance(vd, torch.Tensor):
-            vd = torch.tensor(vd, device=self.device)
-        
-        # Ensure vd is a 3D tensor
-        if vd.dim() == 1:
-            vd = vd.unsqueeze(1).unsqueeze(2)
-        elif vd.dim() == 2:
-            vd = vd.unsqueeze(2)
-        
-        batch_size = vd.shape[0]
-        
+        '''Support not only scalar (Vd, theta_x, theta_y, t) but also batch processing for multiple (vd, theta_x, theta_y, t): vectorization of Vd, theta_x, theta_y, and t: 1D tensors
+        the output shape is then (N_Vd, N_thetax, N_thetay, N_t, nx*ny, nx*ny)'''
+
+        # Convert inputs to tensors and move them to the correct device
+        vd = torch.as_tensor(vd, device=self.device).reshape(-1, 1, 1, 1, 1, 1)
+        theta_x = torch.as_tensor(theta_x, device=self.device).reshape(1, -1, 1, 1, 1, 1)
+        theta_y = torch.as_tensor(theta_y, device=self.device).reshape(1, 1, -1, 1, 1, 1)
+        t = torch.as_tensor(t, device=self.device).reshape(-1, 1)
+
+        N_Vd, N_thetax, N_thetay, N_t = vd.shape[0], theta_x.shape[1], theta_y.shape[2], t.shape[0]
+        # print("N_Vd: ", N_Vd)
+        # print("N_thetax: ", N_thetax)
+        # print("N_thetay: ", N_thetay)
+        # print("N_t: ", N_t)
+        size = self.nx * self.ny
+
         # Calculate dt based on the number of steps per segment
         dt = self.T / (5 * steps_per_segment)
-        
-        H_onsite = self.Hamiltonian_onsite(vd, rotation_angle, a, b, phi1, phi2, delta, initialise, fully_disorder)
-        H1 = self.Hamiltonian_tbc1(theta_x, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        H2 = self.Hamiltonian_tbc2(theta_y, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        H3 = self.Hamiltonian_tbc3(theta_x, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        H4 = self.Hamiltonian_tbc4(theta_y, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        
-        U = torch.eye(self.nx * self.ny, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(batch_size, -1, -1)
-        
-        total_steps = int(t / dt)
-        
-        for step in range(total_steps):
+
+        # Compute H_onsite for all Vd values
+        H_onsite = self.Hamiltonian_onsite(vd.squeeze(), rotation_angle, a, b, phi1, phi2, delta, initialise, fully_disorder)
+        H_onsite = H_onsite.view(N_Vd, 1, 1, 1, size, size).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+        # print("H_onsite shape: ", H_onsite.shape)
+        # Compute H1, H2, H3, H4 for all theta_x and theta_y values
+        H1 = self.Hamiltonian_tbc1(theta_y.squeeze(), tbc).view(1, 1, N_thetay, 1, size, size).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+        H2 = self.Hamiltonian_tbc2(theta_x.squeeze(), tbc).view(1, N_thetax, 1, 1, size, size).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+        H3 = self.Hamiltonian_tbc3(theta_y.squeeze(), tbc).view(1, 1, N_thetay, 1, size, size).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+        H4 = self.Hamiltonian_tbc4(theta_x.squeeze(), tbc).view(1, N_thetax, 1, 1, size, size).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+        # print("H4 shape: ", H4.shape)
+        # Move all tensors to the specified device
+        H_onsite = H_onsite.to(self.device)
+        H1 = H1.to(self.device)
+        H2 = H2.to(self.device)
+        H3 = H3.to(self.device)
+        H4 = H4.to(self.device)
+        identity = torch.eye(size, dtype=torch.cdouble, device=self.device).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+        U = torch.eye(size, dtype=torch.cdouble, device=self.device).expand(N_Vd, N_thetax, N_thetay, N_t, size, size)
+
+        total_steps = torch.floor(t / dt).long()
+        max_steps = total_steps.max().item()
+
+        for step in range(max_steps):
             current_t = step * dt
-            if current_t < self.T/5:
-                Hr = H1
-            elif current_t < 2*self.T/5:
-                Hr = H2
-            elif current_t < 3*self.T/5:
-                Hr = H3
-            elif current_t < 4*self.T/5:
-                Hr = H4
-            else:
-                Hr = torch.zeros_like(H1)
-            
-            U_step = self.infinitesimal_evol_operator(Hr, H_onsite, dt)
+            current_t_mod = current_t % self.T
+            active = step < total_steps
+            active = active.view(1, 1, 1, N_t).expand(N_Vd, N_thetax, N_thetay, -1)
+            mask1 = (current_t_mod < self.T/5) & active
+            mask2 = (current_t_mod >= self.T/5) & (current_t_mod < 2*self.T/5) & active
+            mask3 = (current_t_mod >= 2*self.T/5) & (current_t_mod < 3*self.T/5) & active
+            mask4 = (current_t_mod >= 3*self.T/5) & (current_t_mod < 4*self.T/5) & active
+            mask5 = (current_t_mod >= 4*self.T/5) & active
+            H0 = torch.zeros_like(H1).to(self.device)
+            Hr = torch.zeros_like(H1).to(self.device)
+            Hr[mask1] = H1[mask1]
+            Hr[mask2] = H2[mask2]
+            Hr[mask3] = H3[mask3]
+            Hr[mask4] = H4[mask4]
+            Hr[mask5] = H0[mask5]
+            combined_mask = mask1 | mask2 | mask3 | mask4 | mask5
+            combined_mask = combined_mask.to(self.device)
+            combined_mask = combined_mask.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, -1, size, size)
+            U_step = torch.where(combined_mask, 
+                                self.infinitesimal_evol_operator(Hr, H_onsite, dt),
+                                identity)
             U = U_step @ U
-        
         # Handle any remaining time
         remaining_time = t - total_steps * dt
-        if remaining_time > 0:
-            if t < self.T/5:
-                Hr = H1
-            elif t < 2*self.T/5:
-                Hr = H2
-            elif t < 3*self.T/5:
-                Hr = H3
-            elif t < 4*self.T/5:
-                Hr = H4
-            else:
-                Hr = torch.zeros_like(H1)
-            
-            U_step = self.infinitesimal_evol_operator(Hr, H_onsite, remaining_time)
-            U = U_step @ U
+        mask1 = (t < self.T/5) & (remaining_time > 0)
+        mask2 = (t >= self.T/5) & (t < 2*self.T/5) & (remaining_time > 0)
+        mask3 = (t >= 2*self.T/5) & (t < 3*self.T/5) & (remaining_time > 0)
+        mask4 = (t >= 3*self.T/5) & (t < 4*self.T/5) & (remaining_time > 0)
+        mask5 = (t >= 4*self.T/5) & (remaining_time > 0)
+        mask1 = mask1.view(1, 1, 1, N_t).expand(N_Vd, N_thetax, N_thetay, -1)
+        mask2 = mask2.view(1, 1, 1, N_t).expand(N_Vd, N_thetax, N_thetay, -1)
+        mask3 = mask3.view(1, 1, 1, N_t).expand(N_Vd, N_thetax, N_thetay, -1)
+        mask4 = mask4.view(1, 1, 1, N_t).expand(N_Vd, N_thetax, N_thetay, -1)
+        mask5 = mask5.view(1, 1, 1, N_t).expand(N_Vd, N_thetax, N_thetay, -1)
         
-        return U
-    
+        H0 = torch.zeros_like(H1)
+        Hr = torch.zeros_like(H1)
+        
+        Hr[mask1] = H1[mask1]
+        Hr[mask2] = H2[mask2]
+        Hr[mask3] = H3[mask3]
+        Hr[mask4] = H4[mask4]
+        Hr[mask5] = H0[mask5]
+        
+        combined_mask = mask1 | mask2 | mask3 | mask4 | mask5
+        combined_mask = combined_mask.to(self.device)
+        combined_mask = combined_mask.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, -1, size, size)
+        remaining_time = remaining_time.view(1, 1, 1, N_t, 1, 1).expand(N_Vd, N_thetax, N_thetay, -1, size, size)
+        U_step = torch.where(combined_mask, 
+                            self.infinitesimal_evol_operator(Hr, H_onsite, remaining_time),
+                            identity)
+        U = U_step @ U
+        # print("U shape: ", U.shape)
+        return U.squeeze()
+
     ## Exploring the bulk properties of the system
-    ## Function 1. Quasienergies and states -- COMPLETED
-    ## Function 2. Effective Hamiltonian and the deformation function of the bulk evolution operator -- COMPLETED
-    ## Function 3. The Winding number of the quasienergy gaps
-    ## Function 4. The Chern number of the bulk bands
-    ## Function 5. Level spacing statistics of the bulk evolution operator --COMPLETED
-    ## Function 6. The Inverse Participation Ratios
+    ## Function 1. Quasienergies and wavefuntion -- COMPLETED
+    ## Function 2. The Winding number of the quasienergy gaps and the Chern number of the bulk bands
+    ## Function 3. Level spacing statistics of the bulk evolution operator --COMPLETED
+    ## Function 4. The Inverse Participation Ratios
+    def eigen_grid(self, vd_tensor, N_div, steps_per_segment, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
+        '''Version 2
+        The eigenvalues and eigenvectors on the grid of the quasienergy spectrum'''
+        # Convert vd to a tensor if it's not already one, using the recommended method
+        theta_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
+        theta_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device)
+        t = torch.linspace(0, self.T, N_div+1, device=self.device)
+        U_tensor = self.time_evolution_operator1(t, steps_per_segment, 'xy', vd_tensor, rotation_angle, theta_x, theta_y, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
+        eigvals, eigvecs = torch.linalg.eig(U_tensor)
+        
+        # Free up memory
+        del U_tensor
+        torch.cuda.empty_cache()
+        # Compute the real part of the eigenvalues for sorting
+        eigv = -1j * torch.log(eigvals)
+        # print(eigv)
+        eigv_r = eigv.real
+        
+        # Free up memory
+        del eigv
+        torch.cuda.empty_cache()
+
+        # Sort the eigenvalues based on their real parts
+        sorted_indices = torch.argsort(eigv_r, dim=-1)
+        
+        # Reorder the eigenvalues, their real parts of the log(eigenvalues), and the eigenvectors
+        sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
+        sorted_eigv_r = torch.gather(eigv_r, -1, sorted_indices)
+        expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
+        sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
+        
+        # Free up memory
+        del eigvals, eigv_r, eigvecs, sorted_indices, expanded_indices
+        torch.cuda.empty_cache()
+        if plot == True:
+            fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
+        
+            def update(frame):
+                ax.clear()
+                ax.set_ylim(0, 1.1)
+                
+                # Get eigenvalues for this time frame
+                eigvals_t = sorted_eigvals[:, :, frame, :].reshape(-1)
+                
+                # Debugging prints
+                # print(f"Frame {frame}: Min abs: {torch.min(torch.abs(eigvals_t))}, Max abs: {torch.max(torch.abs(eigvals_t))}")
+                # print(f"Number of eigenvalues: {eigvals_t.numel()}")
+                
+                # Convert to numpy and handle potential complex numbers
+                eigvals_np = eigvals_t.cpu().numpy()
+                angles = np.angle(eigvals_np)
+                magnitudes = np.abs(eigvals_np)
+                
+                # Plot eigenvalues on complex unit circle
+                scatter = ax.scatter(angles, magnitudes, alpha=0.5, s=30)
+                
+                ax.set_title(f'Eigenvalues at t = {t[frame].item():.2f}')
+                return scatter,
+            
+            ani = animation.FuncAnimation(fig, update, frames=N_div+1, blit=True)
+            
+            if save_path is not None:
+                ani.save(save_path, writer='ffmpeg')
+            plt.show()
+        return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
+        
+    def animate_time_spectra(self, vd_value, N_div, steps_per_segment, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True, fps=5, filename= None):
+        ## Here, Vd should be a fixed value and t should be varied
+        sorted_eigv_r, sorted_eigvals, _ = self.eigen_grid(vd_value, N_div, steps_per_segment, a, b, phi1_ex, phi2_ex, rotation_angle, delta, initialise, fully_disorder)
+        theta_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        theta_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        t = torch.linspace(0, self.T, N_div+1, device=self.device)
+        fig = plt.figure(figsize=(20, 10))
+        ax1 = fig.add_subplot(121, projection='3d')
+        ax2 = fig.add_subplot(122, projection='polar')
+        def update(frame):
+            ax1.clear()
+            ax2.clear()
+            # 3D quasienergy plot
+            kx, ky = np.meshgrid(theta_x, theta_y)
+            z = sorted_eigv_r[:, :, frame].cpu().numpy()
+            for i in range(z.shape[-1]):
+                ax1.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
+            ax1.set_xlabel(r'$\theta_{x}$')
+            ax1.set_ylabel(r'$\theta_{y}$')
+            ax1.set_zlabel(r'$T\epsilon$')
+            ax1.set_title(f'Time Shot: {frame}')
+            ax1.set_zlim(-torch.pi, torch.pi)
+            ax1.view_init(elev=2, azim=5)
+            # Polar plot of eigenvalues
+            eigvals_t = sorted_eigvals[:, :, frame, :].reshape(-1)
+            # Convert to numpy and handle potential complex numbers
+            eigvals_np = eigvals_t.cpu().numpy()
+            angles = np.angle(eigvals_np)
+            magnitudes = np.abs(eigvals_np)
+            # Plot eigenvalues on complex unit circle
+            scatter = ax2.scatter(angles, magnitudes, alpha=0.5, s=30)
+            ax2.set_ylim(0, 1.1)
+            ax2.set_yticks([1])  # Only show tick at r=1
+            ax2.set_title(f'Eigenvalues at t = {t[frame].item():.2f}')
+            
+            return ax1, scatter
+        
+        ani = animation.FuncAnimation(fig, update, frames=sorted_eigv_r.shape[2], interval=1000/fps, blit=False)
+        
+        if filename is not None:
+            ani.save(filename, writer='ffmpeg')
+        plt.show()
+    
+    def animate_aperiodic_spectra(self, vd, N_div, t, steps_per_segment, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True, fps=5, filename= None):
+        '''Here, Vd should be tensor and t should be fixed'''
+        sorted_eigv_r, sorted_eigvals, _ = self.eigen_grid(vd, N_div, steps_per_segment, a, b, phi1_ex, phi2_ex, rotation_angle, delta, initialise, fully_disorder)
+        theta_x = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        theta_y = torch.linspace(0, 2*torch.pi/self.a, N_div+1, device=self.device).cpu().numpy()
+        fig = plt.figure(figsize=(20, 10))
+        ax1 = fig.add_subplot(121, projection='3d')
+        ax2 = fig.add_subplot(122, projection='polar')
+        def update(frame):
+            ax1.clear()
+            ax2.clear()
+            # 3D quasienergy plot
+            kx, ky = np.meshgrid(theta_x, theta_y)
+            z = sorted_eigv_r[frame, :, :].cpu().numpy()
+            for i in range(z.shape[-1]):
+                ax1.plot_surface(kx, ky, z[:, :, i], cmap='viridis')
+            ax1.set_xlabel(r'$\theta_{x}$')
+            ax1.set_ylabel(r'$\theta_{y}$')
+            ax1.set_zlabel(r'$T\epsilon$')
+            vd_T = vd/self.T
+            ax1.set_title(f'Aperiodic Strength: {vd_T[frame]} T')
+            ax1.set_zlim(-torch.pi, torch.pi)
+            ax1.view_init(elev=2, azim=5)
+            # Polar plot of eigenvalues
+            eigvals_t = sorted_eigvals[frame, :, :, :].reshape(-1)
+            # Convert to numpy and handle potential complex numbers
+            eigvals_np = eigvals_t.cpu().numpy()
+            angles = np.angle(eigvals_np)
+            magnitudes = np.abs(eigvals_np)
+            # Plot eigenvalues on complex unit circle
+            scatter = ax2.scatter(angles, magnitudes, alpha=0.5, s=30)
+            ax2.set_ylim(0, 1.1)
+            ax2.set_yticks([1])  # Only show tick at r=1
+            ax2.set_title(f'Eigenvalues at frame = {frame}')
+            return ax1, scatter
+        
+        ani = animation.FuncAnimation(fig, update, frames=sorted_eigv_r.shape[2], interval=1000/fps, blit=False)
+        
+        if filename is not None:
+            ani.save(filename, writer='ffmpeg')
+        plt.show()
     
     def quasienergies_states_bulk(self, vd, theta_x, theta_y, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True):
         """The quasi-energy spectrum for the bulk U(theta_x, theta_y, T) properties"""
@@ -1925,7 +2123,7 @@ class tb_floquet_tbc_cuda(nn.Module):
     ## Function 4. The Inverse Participation Ratios
     
     def quasienergies_states_edge(self, vd, rotation_angle, theta_x_num, a=0, b=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
-        '''The quasi-energy spectrum for the edge U(kx, T) properties'''
+        '''The quasi-energy spectrum for the edge U(theta_x, T) properties'''
         '''The output should be the quasienergies which are the diagonal elements of the effective Hamiltonian after diagonalisation. This is an intermediate step towards the 'deformed' time-periodic evolution operator '''
         
         # Ensure vd is a tensor
