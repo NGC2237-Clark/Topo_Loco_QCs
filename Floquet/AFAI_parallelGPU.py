@@ -590,7 +590,8 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
             eigvals, eigvecs = torch.linalg.eig(U)
             E_T = 1j * torch.log(eigvals) / self.T
             # Sort the quasienergies
-            E_T, idx = E_T.real.sort(dim=1)
+            print(E_T.shape)
+            E_T, idx = E_T.real.sort(dim=-1)
             # Use advanced indexing to sort eigenvectors
             eigvecs = eigvecs[torch.arange(k_num).unsqueeze(1), :, idx]
             # torch.cuda.synchronize()
@@ -617,7 +618,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
                 # Visualization without moving to CPU (only plotting will require moving to CPU)
                 k_x_np = k_x.cpu().numpy()  # We need this for plotting
                 eigenvalues_matrix_np = eigenvalues_matrix.cpu().numpy()  # Only move to CPU for plotting
-                print(eigenvalues_matrix_np)
+                # print(eigenvalues_matrix_np)
                 for i in range(k_num):
                     ax.scatter([k_x_np[i]] * eigenvalues_matrix.shape[1], eigenvalues_matrix_np[i, :], color='black', s=0.1)
                 
@@ -2145,32 +2146,45 @@ class tb_floquet_tbc_cuda(nn.Module):
     ## Function 3. Disordered-averaged transmission probability --COMPLETED
     ## Function 4. The Inverse Participation Ratios
     
-    def quasienergies_states_edge(self, vdT, rotation_angle, theta_x_num, a=0, b=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
-        '''The quasi-energy spectrum for the edge U(kx, T) properties'''
+    def quasienergies_states_edge(self, steps_per_segment, tbc, vdT, theta_p_num, rotation_angle = torch.pi/4, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
+        '''The quasi-energy spectrum for the edge U(kx, T) or U(ky, T) properties'''
         '''The output should be the quasienergies which are the diagonal elements of the effective Hamiltonian after diagonalisation. This is an intermediate step towards the 'deformed' time-periodic evolution operator '''
-        
+        size = self.nx * self.ny
         # Ensure vd is a tensor
-        if not isinstance(vdT, torch.Tensor):
+        if isinstance(vdT, (int, float)):
+            vdT = torch.tensor([vdT], device=self.device)
+        elif not isinstance(vdT, torch.Tensor):
             vdT = torch.tensor(vdT, device=self.device)
+        else:
+            vdT = vdT.to(self.device)
         vdT = vdT.reshape(-1, 1, 1)  # Reshape for broadcasting
         
-        theta_x = torch.linspace(0, 2 * torch.pi, theta_x_num, device=self.device)
-        
         batch_size = vdT.shape[0]
-        eigenvalues_matrix = torch.zeros((batch_size, theta_x_num, self.nx * self.ny), device=self.device)
-        wf_matrix = torch.zeros((batch_size, theta_x_num, self.nx * self.ny, self.nx * self.ny), dtype=torch.cdouble, device=self.device)
+        
+        if tbc == 'x':
+            theta = torch.linspace(0, 2 * torch.pi, theta_p_num, device=self.device, dtype=torch.float64)
+            theta_fixed = torch.tensor([0], device=self.device, dtype=torch.float64)
+            U = self.time_evolution_operator1(self.T, steps_per_segment, tbc, vdT, rotation_angle, theta, theta_fixed, a, b, phi1, phi2, delta, initialise, fully_disorder)
+        elif tbc == 'y':
+            theta = torch.linspace(0, 2 * torch.pi, theta_p_num, device=self.device, dtype=torch.float64)
+            theta_fixed = torch.tensor([0], device=self.device, dtype=torch.float64)
+            U = self.time_evolution_operator1(self.T, steps_per_segment, tbc, vdT, rotation_angle, theta_fixed, theta, a, b, phi1, phi2, delta, initialise, fully_disorder)
+        else:
+            raise ValueError("tbc must be either 'x' or 'y'")
 
-        for i_index, i in enumerate(theta_x):
-            U = self.time_evolution_operator(self.T, 'x', vdT, rotation_angle, theta_x=i, a=a, b=b, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
-            eigvals, eigvecs = torch.linalg.eig(U)
-            E_T = torch.log(eigvals).imag / self.T
-            
-            # Sort for each batch
-            E_T, idx = E_T.sort(dim=-1)
-            eigvecs = torch.gather(eigvecs, -1, idx.unsqueeze(-2).expand_as(eigvecs))
-            
-            eigenvalues_matrix[:, i_index, :] = E_T
-            wf_matrix[:, i_index, :, :] = eigvecs
+        eigvals, eigvecs = torch.linalg.eig(U)
+        # print("Shape of eigvecs:", eigvecs.shape)
+        E_T = 1j * torch.log(eigvals) / self.T
+        # Sort the quasienergies
+        E_T, idx = E_T.real.sort(dim=-1)
+        if batch_size == 1:
+            E_T = E_T.unsqueeze(0)  # Shape: [1, N_theta, size]
+        # print(idx.shape)
+        # print(E_T.shape)
+        # Create generalized indexing tensors
+        idx_expanded = idx.unsqueeze(-1).expand_as(eigvecs)
+        eigvecs_sorted = torch.gather(eigvecs, -1, idx_expanded)
+        # print("Shape of eigvecs:", eigvecs.shape)
 
         if plot:
             fig, ax = plt.subplots(figsize=(12, 8))
@@ -2180,17 +2194,21 @@ class tb_floquet_tbc_cuda(nn.Module):
             ax.tick_params(axis='x', labelsize=tick_label_fontsize)
             ax.tick_params(axis='y', labelsize=tick_label_fontsize)
 
-            theta_x_cpu = theta_x.cpu().numpy()
-            
+            theta_cpu = theta.cpu().numpy()
+            eigenvalues_matrix_cpu = E_T[0].cpu().numpy()
+            # print(f"Shape of theta_{tbc}_cpu:", theta_cpu.shape)
+            # print(f"Values of theta_{tbc}_cpu:", theta_cpu)
+            # print("Shape of eigenvalues_matrix_cpu:", eigenvalues_matrix_cpu.shape)
             ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
             ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
             
             # Plot for the first vd in the batch
-            eigenvalues_matrix_cpu = eigenvalues_matrix[0].cpu().numpy()
-            for i in range(theta_x_num):
-                ax.scatter([theta_x_cpu[i]] * eigenvalues_matrix.shape[2], eigenvalues_matrix_cpu[i], c='b', s=0.1)
+            for i in range(theta_p_num):
+                # print(f"Index i: {i}")
+                # print("Scatter plot data length:", len(eigenvalues_matrix_cpu[i]))
+                ax.scatter([theta_cpu[i]] * size, eigenvalues_matrix_cpu[i].real, c='b', s=0.1)
 
-            ax.set_xlabel(r'$\theta_{x}$', fontsize=label_fontsize)
+            ax.set_xlabel(rf'$\theta_{tbc}$', fontsize=label_fontsize)
             ax.set_ylabel('Quasienergy', fontsize=label_fontsize)
             ax.set_xlim(0, 2 * np.pi)
             ax.set_ylim(-np.pi / self.T, np.pi / self.T)
@@ -2198,10 +2216,9 @@ class tb_floquet_tbc_cuda(nn.Module):
             if save_path:
                 plt.tight_layout()
                 fig.savefig(save_path, format='pdf', bbox_inches='tight')
-
             plt.show()
 
-        return eigenvalues_matrix, wf_matrix
+        return E_T.squeeze(), eigvecs_sorted
     
     def taylor_expansion_single(self, H, t, i):
         '''Compute a single term in the Taylor expansion'''
