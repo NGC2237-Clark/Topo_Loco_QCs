@@ -70,7 +70,8 @@ class tb_floquet_pbc: # Tight-binding model of square lattice with Floquet drivi
         self.a = lattice_constant
         self.J_coe = J_coe # hopping matrix element
         self.delta_AB = np.pi/(2* self.T)
-
+        self.sigma_plus = np.array([[0, 1], [0, 0]], dtype=np.cdouble)
+        self.sigma_minus = np.array([[0, 0], [1, 0]], dtype=np.cdouble)
     
     def Hamiltonian_pbc_obc1(self, ky, pbc = 'y'):
         """The time-independent Hamiltonian H1 for t < T/5 with periodic boundary conditions in either x, y, or both x and y directions"""
