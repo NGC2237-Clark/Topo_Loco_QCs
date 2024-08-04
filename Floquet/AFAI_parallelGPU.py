@@ -28,7 +28,8 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         self.ny = num_y # number of sites along the y direction
         self.nx = num_x # number of sites along the x direction
         self.a = lattice_constant # Distance between adjacent site A and A between adjacent two unit cells
-        self.aa = self.a / 2  # Distance between adjacent site A and B in one unit cell
+        # self.aa = self.a / 2  # Distance between adjacent site A and B in one unit cell
+        self.aa = self.a * np.sqrt(2)/ 2  # Distance between adjacent site A and B in one unit cell
         self.J_coe = J_coe / self.T # hopping strengh
         self.delta_AB = np.pi/(2* self.T)
         # Check if device is manually set or based on GPU availability
@@ -1346,8 +1347,8 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         return chi_adjusted * 1j
     
     def H_eff(self, k_num, steps_per_segment, epsilonT = torch.pi, delta=None, reverse=False, pbc='xy'):
-        _, eigenvalues_matrix, wf_matrix = self.quasienergy_eigenstates(self.T, k_num, steps_per_segment, delta, reverse, plot=False, pbc=pbc)
-
+        delete, eigenvalues_matrix, wf_matrix = self.quasienergy_eigenstates(self.T, k_num, steps_per_segment, delta, reverse, plot=False, pbc=pbc)
+        del delete
         log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
         # Initialize H_eff with the same shape and device as wf_matrix
         # Multiply by (1j / self.T) here
@@ -1398,7 +1399,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         
         # Compute H_eff and get log_eigenvalues and S (eigenvectors)
         H_eff, log_eigenvalues, S = self.H_eff(k_num, steps_per_segment, epsilonT, delta, reverse, pbc)
-        
+        del H_eff
         # Reshape t for broadcasting
         t_reshaped = t.reshape(1, 1, -1, 1)
         
@@ -2818,8 +2819,8 @@ class tb_floquet_tbc_cuda(nn.Module):
         return chi_adjusted * 1j
     
     def H_eff(self, steps_per_segment, vdT, theta_x, theta_y, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT = torch.pi, delta=None, initialise=False, fully_disorder=True):
-            _, eigenvalues_matrix, wf_matrix = self.quasienergies_states_bulk(steps_per_segment, vdT, theta_x, theta_y, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
-
+            delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_bulk(steps_per_segment, vdT, theta_x, theta_y, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
+            del delete
             log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
             # Initialize H_eff with the same shape and device as wf_matrix
             # Multiply by (1j / self.T) here
@@ -3084,7 +3085,38 @@ class tb_floquet_tbc_cuda(nn.Module):
         del xi_values_cpu, W3_values_cpu
         gc.collect()
         torch.cuda.empty_cache()   
+    
+    def plot_W3_vs_vdT(self, theta_num, t_num, steps_per_segment, N_xi, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT = torch.pi, delta=None, initialise=False, fully_disorder=True):
+        """
+        Generate a plot of W₃[Uξ] versus the aperiodic strength, vdT where only two branch cut values ξ=0 and pi are chosen.
+        """
+        xi_values = torch.tensor([0, torch.pi], device=self.device)
+        W3_values = torch.zeros((len(vdT), len(xi_values)), device=self.device)
+        for i, aperiodic_strength in enumerate(vdT):
+            for j, xi in enumerate(xi_values):
+                # Compute the deformed U for this ξ value
+                U_xi = self.compute_deformed_U(t_num, theta_num, steps_per_segment, aperiodic_strength, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, epsilonT=xi, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
+                # Compute W₃[Uξ] for this ξ value and store it directly in W3_values
+                W3_values[i,j] = self.compute_winding_number(U_xi)
+                del U_xi
+                torch.cuda.empty_cache()
+        # Convert tensors to numpy arrays for plotting
+        vdT_np = vdT.cpu().numpy()
+        W3_values_np = W3_values.cpu().numpy()
         
+        # Create the plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(vdT_np, W3_values_np[:, 0], label='ξ = 0', marker='o')
+        plt.plot(vdT_np, W3_values_np[:, 1], label='ξ = π', marker='s')
+        plt.ylim(-1.5, 1.5)
+        plt.yticks(range(-1, 2))  # This sets integer ticks from -1 to 1
+        plt.xlabel('Aperiodic Strength (vdT)')
+        plt.ylabel('Winding Number W₃[Uξ]')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+        return W3_values
+                
     ## Now rewrite the above few function without batch processing but calculate every scalar thetax, thetay and t values. (Take very long time.....)
     def compute_deformed_U_single(self, t, theta_x, theta_y, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
         """
@@ -3093,7 +3125,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         U_t = self.time_evolution_operator1(t, steps_per_segment, 'xy', vdT, rotation_angle, theta_x, theta_y, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
         
         H_eff, log_eigenvalues, S = self.H_eff(steps_per_segment, vdT, theta_x, theta_y, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
-
+        del H_eff
         exp_term = torch.exp(1j * t * log_eigenvalues)
         deformation_factor = S @ torch.diag(exp_term) @ S.conj().T
         
@@ -3200,6 +3232,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         U_t = self.time_evolution_operator1(t_batch, steps_per_segment, 'xy', vdT, rotation_angle, theta_x_batch, theta_y_batch, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
         # print('U_t', U_t.shape)
         H_eff, log_eigenvalues, S = self.H_eff(steps_per_segment, vdT, theta_x_batch, theta_y_batch, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+        del H_eff
         # print('H_eff', H_eff.shape)
         # print('S', S.shape)
         # print('log', log_eigenvalues.shape)
@@ -3210,74 +3243,73 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         return U_prime
 
-    # def compute_winding_number_batch(self, theta_num, t_num, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
-    #     d_theta = 2 * torch.pi / theta_num
-    #     d_t = self.T / t_num
+    def compute_winding_number_batchx(self, theta_num, t_num, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
+        '''Batch along thetax direction only. Too slow'''
+        d_theta = 2 * torch.pi / theta_num
+        d_t = self.T / t_num
         
-    #     # Generate all theta_x values at once
-    #     theta_x_all = torch.linspace(0, 2*torch.pi, theta_num, device=self.device)
+        # Generate all theta_x values at once
+        theta_x_all = torch.linspace(0, 2*torch.pi, theta_num, device=self.device)
         
-    #     integral_sum = 0
-    #     for j in range(1, theta_num - 1):
-    #         theta_y = 2 * torch.pi * j / theta_num
-    #         theta_y_plus = 2 * torch.pi * (j + 1) / theta_num
-    #         theta_y_minus = 2 * torch.pi * (j - 1) / theta_num
+        integral_sum = 0
+        for j in range(1, theta_num - 1):
+            theta_y = 2 * torch.pi * j / theta_num
+            theta_y_plus = 2 * torch.pi * (j + 1) / theta_num
+            theta_y_minus = 2 * torch.pi * (j - 1) / theta_num
             
-    #         for k in range(1, t_num - 1):
-    #             print(j,k)
-    #             t = self.T * k / t_num
-    #             t_plus = self.T * (k + 1) / t_num
-    #             t_minus = self.T * (k - 1) / t_num
+            for k in range(1, t_num - 1):
+                print(j,k)
+                t = self.T * k / t_num
+                t_plus = self.T * (k + 1) / t_num
+                t_minus = self.T * (k - 1) / t_num
                 
-    #             U = self.compute_deformed_U_batch(t, theta_x_all, theta_y, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+                U = self.compute_deformed_U_batch(t, theta_x_all, theta_y, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
                 
-    #             # Compute dU_dthetax directly
-    #             dU_dthetax = (U[2:, :, :] - U[:-2, :, :]) / (2 * d_theta)
+                # Compute dU_dthetax directly
+                dU_dthetax = (U[2:, :, :] - U[:-2, :, :]) / (2 * d_theta)
                 
-    #             # Compute dU_dthetay
-    #             U_plus_y = self.compute_deformed_U_batch(t, theta_x_all, theta_y_plus, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
-    #             U_minus_y = self.compute_deformed_U_batch(t, theta_x_all, theta_y_minus, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
-    #             dU_dthetay = (U_plus_y - U_minus_y) / (2 * d_theta)
+                # Compute dU_dthetay
+                U_plus_y = self.compute_deformed_U_batch(t, theta_x_all, theta_y_plus, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+                U_minus_y = self.compute_deformed_U_batch(t, theta_x_all, theta_y_minus, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+                dU_dthetay = (U_plus_y - U_minus_y) / (2 * d_theta)
                 
-    #             # Compute dU_dt
-    #             U_plus_t = self.compute_deformed_U_batch(t_plus, theta_x_all, theta_y, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
-    #             U_minus_t = self.compute_deformed_U_batch(t_minus, theta_x_all, theta_y, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
-    #             dU_dt = (U_plus_t - U_minus_t) / (2 * d_t)
+                # Compute dU_dt
+                U_plus_t = self.compute_deformed_U_batch(t_plus, theta_x_all, theta_y, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+                U_minus_t = self.compute_deformed_U_batch(t_minus, theta_x_all, theta_y, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+                dU_dt = (U_plus_t - U_minus_t) / (2 * d_t)
                 
-    #             # Adjust U and U_dag to match the shape of dU_dthetax
-    #             U = U[1:-1, :, :]
-    #             U_dag = U.conj().transpose(-2, -1)
+                # Adjust U and U_dag to match the shape of dU_dthetax
+                U = U[1:-1, :, :]
+                U_dag = U.conj().transpose(-2, -1)
                 
-    #             term1 = torch.bmm(U_dag, dU_dt[1:-1, :, :])
-    #             term2 = self.commutator(torch.bmm(U_dag, dU_dthetax), torch.bmm(U_dag, dU_dthetay[1:-1, :, :]))
-    #             integrand = torch.einsum('bii->b', torch.bmm(term1, term2)).real
+                term1 = torch.bmm(U_dag, dU_dt[1:-1, :, :])
+                term2 = self.commutator(torch.bmm(U_dag, dU_dthetax), torch.bmm(U_dag, dU_dthetay[1:-1, :, :]))
+                integrand = torch.einsum('bii->b', torch.bmm(term1, term2)).real
                 
-    #             integral_sum += integrand.sum()
+                integral_sum += integrand.sum()
             
-    #         torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
 
-    #     winding_number = (1 / (8 * torch.pi**2)) * integral_sum * d_theta * d_theta * d_t
-    #     return winding_number
+        winding_number = (1 / (8 * torch.pi**2)) * integral_sum * d_theta * d_theta * d_t
+        return winding_number
 
     def compute_winding_number_batch(self, theta_num, t_num, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
+        '''Batch along both thetax and thetay dimensions'''
         d_theta = 2 * torch.pi / theta_num
         d_t = self.T / t_num
         
         # Generate all theta_x and theta_y values at once
-        theta_x_all = torch.linspace(0, 2*torch.pi, theta_num, device=self.device)
-        theta_y_all = torch.linspace(0, 2*torch.pi, theta_num, device=self.device)
-        
-        # Create a mesh grid of theta_x and theta_y
-        theta_x_mesh, theta_y_mesh = torch.meshgrid(theta_x_all, theta_y_all, indexing='ij')
+        theta_values = torch.linspace(0, 2*torch.pi, theta_num, device=self.device)
         
         integral_sum = 0
         for k in range(1, t_num - 1):
-            print(k)
+            print(f"Time step: {k}/{t_num-2}")
             t = self.T * k / t_num
             t_plus = self.T * (k + 1) / t_num
             t_minus = self.T * (k - 1) / t_num
             
-            U = self.compute_deformed_U_batch(t * torch.ones_like(theta_x_mesh), theta_x_mesh, theta_y_mesh, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+            # Compute U for all theta_x and theta_y combinations
+            U = self.compute_deformed_U_batch(t, theta_values, theta_values, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
             
             # Compute dU_dthetax directly
             dU_dthetax = (U[2:, :, :, :] - U[:-2, :, :, :]) / (2 * d_theta)
@@ -3286,27 +3318,23 @@ class tb_floquet_tbc_cuda(nn.Module):
             dU_dthetay = (U[:, 2:, :, :] - U[:, :-2, :, :]) / (2 * d_theta)
             
             # Compute dU_dt
-            U_plus_t = self.compute_deformed_U_batch(t_plus * torch.ones_like(theta_x_mesh), theta_x_mesh, theta_y_mesh, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
-            U_minus_t = self.compute_deformed_U_batch(t_minus * torch.ones_like(theta_x_mesh), theta_x_mesh, theta_y_mesh, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+            U_plus_t = self.compute_deformed_U_batch(t_plus, theta_values, theta_values, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+            U_minus_t = self.compute_deformed_U_batch(t_minus, theta_values, theta_values, steps_per_segment, vdT, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
             dU_dt = (U_plus_t - U_minus_t) / (2 * d_t)
-            
-            del U_plus_t, U_minus_t  # Free up memory
             
             # Adjust U and U_dag to match the shape of dU_dthetax and dU_dthetay
             U = U[1:-1, 1:-1, :, :]
             U_dag = U.conj().transpose(-2, -1)
             
             term1 = torch.einsum('abij,abjk->abik', U_dag, dU_dt[1:-1, 1:-1, :, :])
-            del dU_dt  # Free up memory
             term2 = self.commutator(
                 torch.einsum('abij,abjk->abik', U_dag, dU_dthetax[:, 1:-1, :, :]),
                 torch.einsum('abij,abjk->abik', U_dag, dU_dthetay[1:-1, :, :, :])
             )
-            del U_dag_dU_dthetax, U_dag_dU_dthetay  # Free up memory
             integrand = torch.einsum('abii->ab', torch.einsum('abij,abjk->abik', term1, term2)).real
-            del term1, term2  # Free up memory
             integral_sum += integrand.sum()
-            del U, U_dag, integrand  # Free up memory
+            
+            del U, U_plus_t, U_minus_t, dU_dthetax, dU_dthetay, dU_dt, U_dag, term1, term2, integrand
             torch.cuda.empty_cache()
 
         winding_number = (1 / (8 * torch.pi**2)) * integral_sum * d_theta * d_theta * d_t
@@ -3374,7 +3402,7 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         return level_spacing_avg
     
-    def avg_LSR__disorder_realisation(self, steps_per_segment, vdT_min, vdT_max, vdT_num, N_dis, delta=None, save_path=None):
+    def avg_LSR_disorder_realisation(self, steps_per_segment, vdT_min, vdT_max, vdT_num, N_dis, delta=None, save_path=None):
         """Plot the average level-spacing ratio of the bulk time evolution operator averaging over given number of disorder realisation"""
         vdT = torch.linspace(vdT_min, vdT_max, vdT_num, device=self.device)
         avg = torch.zeros(vdT_num, device=self.device)
@@ -3446,14 +3474,16 @@ class tb_floquet_tbc_cuda(nn.Module):
     
     ## Exploring the edge properties of the system
     ## Function 1. Quasienergies and states -- COMPLETED
-    ## Function 2. Deformed time-periodic evolution operator
+    ## Function 2. Deformed time-periodic evolution operator --COMPLETED
     ## Function 3. Disordered-averaged transmission probability --COMPLETED
-    ## Function 4. The Inverse Participation Ratios
+    ## Function 4. Quantised Charge Pumping --COMPLETED
+    ## Function 5. The Inverse Participation Ratios
     
     def quasienergies_states_edge(self, steps_per_segment, tbc, vdT, theta_p_num, rotation_angle = torch.pi/4, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
         '''The quasi-energy spectrum for the edge U(kx, T) or U(ky, T) properties'''
         '''The output should be the quasienergies which are the diagonal elements of the effective Hamiltonian after diagonalisation. This is an intermediate step towards the 'deformed' time-periodic evolution operator '''
         size = self.nx * self.ny
+        theta_p_num += 1
         # Ensure vd is a tensor
         if isinstance(vdT, (int, float)):
             vdT = torch.tensor([vdT], device=self.device)
@@ -3462,8 +3492,6 @@ class tb_floquet_tbc_cuda(nn.Module):
         else:
             vdT = vdT.to(self.device)
         vdT = vdT.reshape(-1, 1, 1)  # Reshape for broadcasting
-        
-        batch_size = vdT.shape[0]
         
         if tbc == 'x':
             theta = torch.linspace(0, 2 * torch.pi, theta_p_num, device=self.device, dtype=torch.float64)
@@ -3480,28 +3508,26 @@ class tb_floquet_tbc_cuda(nn.Module):
         # print("Original eigvecs shape:", eigvecs.shape)
         # print("Original eigvecs norm:", torch.norm(eigvecs, dim=-2))
         # print(eigvecs[0])  # Print the first matrix of eigenvectors
-
+        del U
         E_T = 1j * torch.log(eigvals) / self.T
         E_T_real = E_T.real
 
         # Sort the real parts of E_T
         sorted_indices = torch.argsort(E_T_real, dim=-1)
 
-        # Apply the sorting to E_T and eigvecs
-        E_T_sorted = torch.gather(E_T, -1, sorted_indices)
+        # Reorder the quasienergy, and the eigenvectors
+        sorted_eigv_r = torch.gather(E_T, -1, sorted_indices)
+        sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
+        expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
+        sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
 
-        # Correctly gather eigenvectors
-        eigvecs_sorted = torch.zeros_like(eigvecs)
-        for i in range(eigvecs.shape[0]):
-            eigvecs_sorted[i] = eigvecs[i][:, sorted_indices[i]]
-
-        # print(eigvecs_sorted[0])  # Print the first matrix of sorted eigenvectors
-        # print("Sorted eigvecs shape:", eigvecs_sorted.shape)
-        # print("Sorted eigvecs norm:", torch.norm(eigvecs_sorted, dim=-2))
+        # print(sorted_eigvecs[0])  # Print the first matrix of sorted eigenvectors
+        # print("Sorted eigvecs shape:", sorted_eigvecs.shape)
+        # print("Sorted eigvecs norm:", torch.norm(sorted_eigvecs, dim=-2))
 
         # Check orthogonality
-        dot_products = torch.matmul(eigvecs_sorted.transpose(-1, -2).conj(), eigvecs_sorted)
-        off_diagonal = dot_products - torch.eye(dot_products.shape[-1], device=dot_products.device)
+        # dot_products = torch.matmul(sorted_eigvecs.transpose(-1, -2).conj(), sorted_eigvecs)
+        # off_diagonal = dot_products - torch.eye(dot_products.shape[-1], device=dot_products.device)
         # print("Max off-diagonal element:", torch.max(torch.abs(off_diagonal)))
 
         if plot:
@@ -3513,7 +3539,10 @@ class tb_floquet_tbc_cuda(nn.Module):
             ax.tick_params(axis='y', labelsize=tick_label_fontsize)
 
             theta_cpu = theta.cpu().numpy()
-            eigenvalues_matrix_cpu = E_T[0].cpu().numpy()
+            if sorted_eigv_r.dim() == 3:
+                eigenvalues_matrix_cpu = sorted_eigv_r[0].cpu().numpy()
+            elif sorted_eigv_r.dim() == 2:
+                eigenvalues_matrix_cpu = sorted_eigv_r.cpu().numpy()
             # print(f"Shape of theta_{tbc}_cpu:", theta_cpu.shape)
             # print(f"Values of theta_{tbc}_cpu:", theta_cpu)
             # print("Shape of eigenvalues_matrix_cpu:", eigenvalues_matrix_cpu.shape)
@@ -3536,8 +3565,132 @@ class tb_floquet_tbc_cuda(nn.Module):
                 fig.savefig(save_path, format='pdf', bbox_inches='tight')
             plt.show()
 
-        return E_T.squeeze(), eigvecs_sorted
+        return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
     
+    # def H_eff_edge(self, steps_per_segment, vdT, N_theta, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
+        
+    #     delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_edge(steps_per_segment, 'x', vdT, N_theta, rotation_angle=rotation_angle, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
+    #     del delete
+    #     log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
+    #     log_eigenvalues = (1j / self.T) * log_eigenvalues
+
+    #     # Initialize H_eff with the same shape and device as wf_matrix
+    #     H_eff = torch.zeros_like(wf_matrix, dtype=torch.complex128)
+
+    #     # Create diagonal matrices for all theta-points at once
+    #     H_diag = torch.diag_embed(log_eigenvalues)
+
+    #     # Ensure wf_matrix is complex
+    #     wf_matrix = wf_matrix.to(torch.complex128)
+
+    #     # Compute H_eff for all theta-points in one batch operation
+    #     H_eff = torch.bmm(torch.bmm(wf_matrix, H_diag), wf_matrix.conj().transpose(-2, -1))
+
+    #     return H_eff, log_eigenvalues, wf_matrix
+    
+    def deform_F_op(self, s, l1, l2):
+        '''All y and l1 and l2 are counted from 1 instead of 0'''
+        matrix_size = self.nx * self.ny
+        diagonal = torch.zeros(matrix_size, device=self.device)
+        
+        for i in range(matrix_size):
+            y = i // self.nx +1 # Get the y coordinate
+            # print(y)
+            if y <= l1:
+                diagonal[i] = 0
+            elif l1 < y <= l2:
+                diagonal[i] = s * (y - l1) / (l2 - l1)
+            elif l2 < y < (self.ny - l2):
+                diagonal[i] = s
+            elif (self.ny - l2) <= y <= (self.ny - l1):
+                diagonal[i] = s * (self.ny - l1 - y) / (l2 - l1)
+            else:  # y > (self.ny - l1)
+                diagonal[i] = 0
+        # print(diagonal)
+        return torch.diag(diagonal)
+    
+    def compute_deformed_U_edge(self, l1, l2, t, theta_num, steps_per_segment, vdT, rotation_angle=torch.pi/4, epsilonT=torch.pi, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, visualize=False):
+        thetax, thetay = self.get_theta_values(theta_num+1, 'x')
+        
+        # First the time evolution operator defined on a cylinder
+        U_t = self.time_evolution_operator1(t, steps_per_segment, 'x', vdT, rotation_angle, thetax, thetay, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
+        
+        # Second, the H_eff that is defined on a torus
+        H_eff, log_eigenvalues, S = self.H_eff(steps_per_segment, vdT, thetax, thetay, a, b, phi1_ex, phi2_ex, rotation_angle, epsilonT, delta, initialise, fully_disorder)
+        del log_eigenvalues, S
+        # Create the deformation operator F
+        F_operator = self.deform_F_op(s=1, l1=l1, l2=l2).to(torch.complex128)
+        
+        # Compute the deformed effective Hamiltonian
+        H_eff_deformed = F_operator @ H_eff @ F_operator
+        
+        # Compute exp(it H_eff_deformed)
+        t = torch.as_tensor(t).to(H_eff_deformed.device)
+        exp_H_eff_deformed = torch.matrix_exp(1j * t * H_eff_deformed)
+        
+        # Compute the final deformed evolution operator
+        U_epsilon = U_t @ exp_H_eff_deformed
+
+        # Check unitarity
+        unitarity_error = torch.norm(U_epsilon @ U_epsilon.conj().transpose(-2, -1) - torch.eye(U_epsilon.shape[-1], device=U_epsilon.device, dtype=U_epsilon.dtype))
+        print(f"Final unitarity error: {unitarity_error.item()}")
+
+        if visualize:
+            # Visualization function
+            def visualize_matrix(matrix, title):
+                plt.figure(figsize=(10, 10))
+                
+                if isinstance(matrix, torch.Tensor):
+                    matrix = matrix.cpu().detach().numpy()
+                
+                if np.iscomplexobj(matrix):
+                    plt.imshow(np.abs(matrix), cmap='viridis')
+                else:
+                    plt.imshow(matrix, cmap='viridis')
+                
+                plt.colorbar()
+                plt.title(title)
+                plt.show()
+
+            # Visualize the deformed evolution operator
+            visualize_matrix(U_epsilon[0], f"Deformed Evolution Operator (l1={l1}, l2={l2})")
+
+        return U_epsilon
+    
+    def separate_edge_operators(self, U_epsilon, threshold=1e-10):
+        """
+        Separate U_1,ε and U_2,ε from the full U_epsilon matrix.
+        
+        Parameters:
+        U_epsilon (torch.Tensor): The full deformed evolution operator.
+        threshold (float): Threshold to determine non-zero elements.
+        
+        Returns:
+        tuple: (U_1_epsilon, U_2_epsilon)
+        """
+        # Assuming U_epsilon is a 3D tensor: [theta, N, N]
+        N = U_epsilon.shape[-1]
+        
+        # Find the first and last non-zero rows/columns
+        row_norms = torch.norm(U_epsilon[0], dim=1)
+        col_norms = torch.norm(U_epsilon[0], dim=0)
+        
+        first_non_zero = torch.where(row_norms > threshold)[0][0].item()
+        last_non_zero = torch.where(row_norms > threshold)[0][-1].item()
+        
+        # Sanity check: ensure column-wise separation matches row-wise
+        assert first_non_zero == torch.where(col_norms > threshold)[0][0].item()
+        assert last_non_zero == torch.where(col_norms > threshold)[0][-1].item()
+        
+        # Extract U_1,ε from the top-left corner
+        U_1_epsilon = U_epsilon[..., :first_non_zero, :first_non_zero]
+        
+        # Extract U_2,ε from the bottom-right corner
+        U_2_epsilon = U_epsilon[..., last_non_zero+1:, last_non_zero+1:]
+        
+        return U_1_epsilon, U_2_epsilon
+    
+    ## Evolving a delta wavefunction --> Transmission probability
     def taylor_expansion_single(self, H, t, i):
         '''Compute a single term in the Taylor expansion'''
         return 1 / np.math.factorial(i) * (-1j * t) ** i * torch.matrix_power(H, i)
@@ -4132,7 +4285,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         expectation_values_diagonal = torch.diagonal(expectation_values, dim1=-2, dim2=-1)
 
         return expectation_values_diagonal.real
-           
+
     def simpson_integration(self, vdT_tensor, theta_x, N_div, steps_per_segment, n=1, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, delta=None, initialise=False, fully_disorder=True):
         """
         Perform Simpson's rule integration of the expectation value <psi(t)|derivative_H|psi(t)> over time,
@@ -4317,7 +4470,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         Parameters:
         initial_state (torch.Tensor): The initial single-particle state (1D tensor)
         floquet_states_t (torch.Tensor): 3D or 4D tensor of Floquet states
-                                         Shape: (t, size, size) or (theta_x, t, size, size)
+        Shape: (t, size, size) or (theta_x, t, size, size)
         
         Returns:
         torch.Tensor: nj values for each Floquet state (and theta_x if applicable): (size) or (theta_x, size)
