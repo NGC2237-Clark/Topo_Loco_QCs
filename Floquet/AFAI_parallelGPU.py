@@ -1852,6 +1852,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         phi2 = 2 * np.pi * (a * torch.sin(rotation_angle).item() + b * torch.cos(rotation_angle).item())
 
         # Calculate the potential and assign it correctly to the diagonal
+        print('phi1 is', phi1_ex, 'phi1 is', phi2_ex)
         potential = torch.cos(2 * np.pi * u + phi1 + phi1_ex) + torch.cos(2 * np.pi * v + phi2 + phi2_ex)
         potential = potential.reshape(self.ny, self.nx).to(torch.cdouble)
         
@@ -3084,9 +3085,9 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Clear remaining variables
         del xi_values_cpu, W3_values_cpu
         gc.collect()
-        torch.cuda.empty_cache()   
+        torch.cuda.empty_cache()
     
-    def plot_W3_vs_vdT(self, theta_num, t_num, steps_per_segment, N_xi, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT = torch.pi, delta=None, initialise=False, fully_disorder=True):
+    def plot_W3_vs_vdT(self, theta_num, t_num, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, delta=None, initialise=False, fully_disorder=True):
         """
         Generate a plot of W₃[Uξ] versus the aperiodic strength, vdT where only two branch cut values ξ=0 and pi are chosen.
         """
@@ -3475,9 +3476,10 @@ class tb_floquet_tbc_cuda(nn.Module):
     ## Exploring the edge properties of the system
     ## Function 1. Quasienergies and states -- COMPLETED
     ## Function 2. Deformed time-periodic evolution operator --COMPLETED
-    ## Function 3. Disordered-averaged transmission probability --COMPLETED
-    ## Function 4. Quantised Charge Pumping --COMPLETED
-    ## Function 5. The Inverse Participation Ratios
+    ## Function 3. Edge state invariant
+    ## Function 4. Disordered-averaged transmission probability --COMPLETED
+    ## Function 5. Quantised Charge Pumping --COMPLETED
+    ## Function 6. The Inverse Participation Ratios
     
     def quasienergies_states_edge(self, steps_per_segment, tbc, vdT, theta_p_num, rotation_angle = torch.pi/4, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
         '''The quasi-energy spectrum for the edge U(kx, T) or U(ky, T) properties'''
@@ -3659,36 +3661,92 @@ class tb_floquet_tbc_cuda(nn.Module):
     
     def separate_edge_operators(self, U_epsilon, threshold=1e-10):
         """
-        Separate U_1,ε and U_2,ε from the full U_epsilon matrix.
+        Separate U_1,ε and U_2,ε from the full U_epsilon matrix by identifying the identity block in the middle.
         
         Parameters:
-        U_epsilon (torch.Tensor): The full deformed evolution operator.
-        threshold (float): Threshold to determine non-zero elements.
+        U_epsilon (torch.Tensor): The full deformed evolution operator (complex128).
+        threshold (float): Threshold to determine closeness to 1 for diagonal elements.
         
         Returns:
         tuple: (U_1_epsilon, U_2_epsilon)
         """
-        # Assuming U_epsilon is a 3D tensor: [theta, N, N]
         N = U_epsilon.shape[-1]
         
-        # Find the first and last non-zero rows/columns
-        row_norms = torch.norm(U_epsilon[0], dim=1)
-        col_norms = torch.norm(U_epsilon[0], dim=0)
+        # Function to check if a diagonal element is close to 1
+        def is_identity(x):
+            return torch.isclose(torch.abs(x), torch.tensor(1.0, dtype=torch.float64), atol=threshold)
         
-        first_non_zero = torch.where(row_norms > threshold)[0][0].item()
-        last_non_zero = torch.where(row_norms > threshold)[0][-1].item()
+        # Find the start of the identity block
+        identity_start = 0
+        while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start]):
+            identity_start += 1
         
-        # Sanity check: ensure column-wise separation matches row-wise
-        assert first_non_zero == torch.where(col_norms > threshold)[0][0].item()
-        assert last_non_zero == torch.where(col_norms > threshold)[0][-1].item()
+        # Find the end of the identity block
+        identity_end = N - 1
+        while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end]):
+            identity_end -= 1
+   
+        # Calculate the sizes of U_1 and U_2
+        u1_size = identity_start
+        u2_size = N - (identity_end + 1)
         
-        # Extract U_1,ε from the top-left corner
-        U_1_epsilon = U_epsilon[..., :first_non_zero, :first_non_zero]
+        # Balance the sizes
+        edge_size = max(u1_size, u2_size)
+        # Extract U_1,ε and U_2,ε with balanced sizes
+        U_1_epsilon = U_epsilon[:, :edge_size, :edge_size]
+        U_2_epsilon = U_epsilon[:, -edge_size:, -edge_size:]
         
-        # Extract U_2,ε from the bottom-right corner
-        U_2_epsilon = U_epsilon[..., last_non_zero+1:, last_non_zero+1:]
+        # print(f"Identity block found from {identity_start} to {identity_end}")
+        # print(f"Shape of U_1_epsilon: {U_1_epsilon.shape}")
+        # print(f"Shape of U_2_epsilon: {U_2_epsilon.shape}")
+        
+        # Check off-diagonal elements in the supposed identity block
+        off_diag_max = torch.max(torch.abs(U_epsilon[0, identity_start:identity_end+1, identity_start:identity_end+1] - torch.eye(identity_end-identity_start+1, dtype=U_epsilon.dtype, device=U_epsilon.device)))
+        # print(f"Max off-diagonal element in identity block: {off_diag_max}")
         
         return U_1_epsilon, U_2_epsilon
+    
+    def calculate_edge_winding_number(self, l1, l2, t, theta_num, steps_per_segment, vdT, 
+                                  rotation_angle=torch.pi/4, epsilonT=torch.pi, 
+                                  a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, 
+                                  initialise=False, fully_disorder=True, visualize=False, tolerance= 1e-10):
+        """
+        Calculate the edge winding numbers for U1 or U2 in the AFAI model.
+        Returns:
+        tuple: (n_edge_1, n_edge_2) Edge winding numbers for U1 (or U2)
+        """
+        # Compute the full deformed evolution operator
+        U_epsilon = self.compute_deformed_U_edge(l1, l2, t, theta_num, steps_per_segment, vdT,
+                                                rotation_angle, epsilonT, a, b, phi1_ex, phi2_ex,
+                                                delta, initialise, fully_disorder, visualize)
+        
+        # Separate U1 and U2
+        U1, U2 = self.separate_edge_operators(U_epsilon, threshold=tolerance)
+
+        def compute_winding_number(U_edge):
+            # Compute step size
+            dtheta = 2 * torch.pi / theta_num
+
+            # Compute the derivative using central difference
+            dU = (U_edge[2:] - U_edge[:-2]) / (2 * dtheta)
+
+            # Compute U^dagger * dU/dtheta and take the trace in one operation
+            integrand = torch.einsum('...ii', torch.matmul(U_edge[1:-1].conj().transpose(-2, -1), dU))
+            # Print information about the integrand
+            # print(f"Integrand shape: {integrand.shape}")
+            # print(f"Integrand dtype: {integrand.dtype}")
+            # print(f"First few values of integrand: {integrand[:5]}")
+            # print(f"Mean of real part: {integrand.real.mean()}")
+            # print(f"Mean of imaginary part: {integrand.imag.mean()}")
+            # Sum over theta (which is equivalent to integration in the discrete case)
+            n_edge = torch.sum(integrand.imag) * dtheta / (2 * torch.pi)
+
+            return n_edge.item()
+
+        n_edge_1 = compute_winding_number(U1)
+        n_edge_2 = compute_winding_number(U2)
+
+        return n_edge_1, n_edge_2
     
     ## Evolving a delta wavefunction --> Transmission probability
     def taylor_expansion_single(self, H, t, i):
