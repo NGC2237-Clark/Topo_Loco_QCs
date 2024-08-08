@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
-from multiprocessing import Pool
+# from multiprocessing import Pool
 from torch import nn
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.animation as animation
@@ -28,8 +28,8 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         self.ny = num_y # number of sites along the y direction
         self.nx = num_x # number of sites along the x direction
         self.a = lattice_constant # Distance between adjacent site A and A between adjacent two unit cells
-        # self.aa = self.a / 2  # Distance between adjacent site A and B in one unit cell
-        self.aa = self.a * np.sqrt(2)/ 2  # Distance between adjacent site A and B in one unit cell
+        self.aa = self.a / 2  # Distance between adjacent site A and B in one unit cell
+        # self.aa = self.a * np.sqrt(2)/ 2  # Distance between adjacent site A and B in one unit cell
         self.J_coe = J_coe / self.T # hopping strengh
         self.delta_AB = np.pi/(2* self.T)
         # Check if device is manually set or based on GPU availability
@@ -629,7 +629,6 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         return U.squeeze()
     
     def quasienergy_eigenstates(self, t, k_num, steps_per_segment, delta=None, reverse=False, plot=False, save_path=None, pbc='x'):
-        k_num += 1
         
         def compute_sorted_eigensystem(U):
             eigvals, eigvecs = torch.linalg.eig(U)
@@ -715,7 +714,6 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         return eigenvalues_matrix, eigval, wf_matrix
     
     def quasienergy_eigenstates0(self, t, k_num, n, delta=None, reverse=False, plot=False, save_path=None, pbc='x'):
-        k_num += 1
         
         def compute_sorted_eigensystem(U):
             eigvals, eigvecs = torch.linalg.eig(U)
@@ -1258,21 +1256,21 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         # print(f"delta: {delta}")
         # print(f"reverse: {reverse}")
         w3, eigvals, eigvecs = self.w3(ini, N_div, steps_per_segment, delta, reverse)
+        # print(eigvals.shape)
         print(w3)
         # Initialize correction_term based on branch_cut_angle type
         if isinstance(branch_cut_angle, torch.Tensor):
             correction_term = torch.zeros(len(branch_cut_angle), device=self.device)
         else:
             correction_term = 0
-        
         # Iterate over the 2D grid at μ3 = 1 (i3 = N_div)
         for i1 in range(N_div):
             for i2 in range(N_div):
-                # print(r"($i_1, i_2, i_3$)", i1+1,i2+1)
                 # Compute the base point p
-                p = torch.tensor([(i1) * 2*torch.pi/(self.a * N_div),
-                                (i2) * 2*torch.pi/(self.a * N_div),
-                                self.T], dtype=torch.float64, device=self.device)
+                # print(r"($i_1, i_2$)", i1,i2)
+                # p = torch.tensor([(i1) * 2*torch.pi/(self.a * N_div),
+                #                 (i2) * 2*torch.pi/(self.a * N_div),
+                #                 self.T], dtype=torch.float64, device=self.device)
                 # print('p', p)
                 # Compute F^ν_p,3
                 vertices = torch.tensor([
@@ -1307,15 +1305,16 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         W3_U_xi = (w3 + correction_term)
         if plot:
             # Plot for multiple branch cut angles
+            tick_label_fontsize = 32
+            label_fontsize = 34
             plt.figure(figsize=(10, 6))
             plt.plot(branch_cut_angle.cpu().numpy(), W3_U_xi.cpu().numpy(), '-o')
-            plt.xlabel('Branch Cut Angle, $\\xi$')
-            plt.ylabel('$W_{3}[U_{\\xi}]$')
+            plt.xlabel('Branch Cut Angle, $\\varepsilon$', fontsize=label_fontsize)
+            plt.ylabel('$W_{3}[U_{\\varepsilon}]$', fontsize=label_fontsize)
             plt.ylim(-1.5, 1.5)
-            plt.yticks(range(-1, 2))  # This sets integer ticks from -1 to 1
-            # plt.title('Winding Number vs Branch Cut Angle')
+            plt.yticks(range(-1, 2), fontsize=tick_label_fontsize)  # This sets integer ticks from -1 to 1 with specified fontsize
             plt.xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi],
-                [r'$-\pi$', r'$-\pi/2$','0', r'$\pi/2$', r'$\pi$'])
+                    [r'$-\pi$', r'$-\pi/2$', '0', r'$\pi/2$', r'$\pi$'], fontsize=tick_label_fontsize)
             plt.grid(True)
             plt.show()
         return W3_U_xi
@@ -1390,28 +1389,30 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
 
     def compute_deformed_U(self, t_num, k_num, steps_per_segment, epsilonT=torch.pi, delta=None, reverse=False, pbc='xy'):
         # Generate t values
-        t_num += 1
         t = torch.linspace(0, self.T, t_num, device=self.device)
-        
+        # print('t shape', t.shape)
         # First, compute U(kx, ky, t) for 0 <= t <= T
-        k_x, k_y = self.get_k_values(k_num+1, pbc)
+        k_x, k_y = self.get_k_values(k_num, pbc)  # Adjusted to k_num
         U_t = self.time_evolution_operator_pbc1(t, steps_per_segment, k_x, k_y, pbc, delta, reverse)
-        
+        # print('U_t shape', U_t.shape)
         # Compute H_eff and get log_eigenvalues and S (eigenvectors)
         H_eff, log_eigenvalues, S = self.H_eff(k_num, steps_per_segment, epsilonT, delta, reverse, pbc)
+        # print("log_eigenvalues shape:", log_eigenvalues.shape)
         del H_eff
         # Reshape t for broadcasting
         t_reshaped = t.reshape(1, 1, -1, 1)
-        
+        # print('t_reshaped shape', t_reshaped.shape)
         # Compute exp(1j*t*log_eigenvalues) for all time steps
         exp_term = torch.exp(1j * t_reshaped * log_eigenvalues.unsqueeze(2))
-        
+        # print('exp_term shape', exp_term.shape)
         # Reshape exp_term for matrix multiplication
         exp_term_diag = torch.diag_embed(exp_term)
         
         # Expand S to match the time dimension
         S_expanded = S.unsqueeze(2).expand(-1, -1, t_num, -1, -1)
-        
+        # print("S_expanded shape:", S_expanded.shape)
+        # print("exp_term_diag shape:", exp_term_diag.shape)
+        # print("S_expanded.conj().transpose(-1, -2) shape:", S_expanded.conj().transpose(-1, -2).shape)
         # Compute S * exp(1j*t*log_eigenvalues) * S^+
         deformation_factor = torch.einsum('...tij,...tjk,...tkl->...til', S_expanded, exp_term_diag, S_expanded.conj().transpose(-1, -2))
         
@@ -1419,6 +1420,7 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         U_prime = torch.einsum('...tij,...tjk->...tik', U_t, deformation_factor)
         
         return U_prime
+
     
     def commutator(self, A, B):
         return torch.matmul(A, B) - torch.matmul(B, A)
@@ -1571,6 +1573,44 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
 
         plt.show()
 
+    def convergence_w3(self, grid_num_range, steps_per_segment, delta=None, reverse=False, save_path=None):
+        '''Convergence test for the deformed'''
+        print('grid', grid_num_range)
+        xi_values = torch.tensor([0, torch.pi], device=self.device)
+        bulk_invariant_values = torch.zeros((len(grid_num_range), len(xi_values)), device=self.device)
+        for i, num in enumerate(grid_num_range):
+            for j, xi in enumerate(xi_values):
+                print(i,j)
+                print('num', num)
+                U_xi = self.compute_deformed_U(t_num=num, k_num=num, steps_per_segment=steps_per_segment, epsilonT=xi, delta=delta, reverse=reverse, pbc='xy')
+                bulk_invariant_values[i,j] = self.compute_winding_number(U_xi)
+        # Convert to numpy arrays for plotting
+        grid_np = grid_num_range.cpu().numpy() if isinstance(grid_num_range, torch.Tensor) else np.array(grid_num_range)
+        bulk_np = bulk_invariant_values.cpu().numpy()
+        # Font sizes
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        legend_fontsize = 32
+
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.plot(grid_np, bulk_np[:, 0], label=r'$\varepsilon = 0$', marker='o')
+        ax.plot(grid_np, bulk_np[:, 1], label=r'$\varepsilon = \pi$', marker='s')
+        ax.set_xlabel(r'$N$', fontsize=label_fontsize)
+        ax.set_ylabel(r'$W_3[U_\varepsilon]$', fontsize=label_fontsize)
+        ax.legend(fontsize=legend_fontsize)
+        ax.tick_params(axis='both', which='major', labelsize=tick_label_fontsize)
+        ax.grid(True)
+
+        if save_path:
+            plt.tight_layout()
+            fig.savefig(save_path, format='pdf', bbox_inches='tight')
+        
+        plt.show()
+        return bulk_invariant_values
+        
+        
+        
 class tb_floquet_tbc_cuda(nn.Module):
     def __init__(self, period, lattice_constant, J_coe, ny, nx=2, device=None):
         super(tb_floquet_tbc_cuda, self).__init__()
@@ -1852,7 +1892,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         phi2 = 2 * np.pi * (a * torch.sin(rotation_angle).item() + b * torch.cos(rotation_angle).item())
 
         # Calculate the potential and assign it correctly to the diagonal
-        print('phi1 is', phi1_ex, 'phi1 is', phi2_ex)
+        print('phi1 is', phi1_ex, 'phi2 is', phi2_ex)
         potential = torch.cos(2 * np.pi * u + phi1 + phi1_ex) + torch.cos(2 * np.pi * v + phi2 + phi2_ex)
         potential = potential.reshape(self.ny, self.nx).to(torch.cdouble)
         
@@ -2319,7 +2359,7 @@ class tb_floquet_tbc_cuda(nn.Module):
                 ani.save(save_path, writer='ffmpeg')
             plt.show()
         return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
-      
+
     def animate_time_spectra(self, vdT_value, N_div, steps_per_segment, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True, fps=5, filename= None):
         ## Here, Vd should be a fixed value and t should be varied
         sorted_eigv_r, sorted_eigvals, _ = self.eigen_grid(vdT_value, N_div, steps_per_segment, a, b, phi1_ex, phi2_ex, rotation_angle, delta, initialise, fully_disorder)
@@ -2363,11 +2403,12 @@ class tb_floquet_tbc_cuda(nn.Module):
             ani.save(filename, writer='ffmpeg')
         plt.show()
     
-    def animate_aperiodic_spectra(self, vdT, N_div, t, steps_per_segment, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True, fps=5, filename= None):
+    def animate_aperiodic_spectra(self, vdT, N_div, steps_per_segment, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=np.pi/4, delta=None, initialise=False, fully_disorder=True, fps=5, filename= None):
         '''Here, Vd should be tensor and t should be fixed'''
-        sorted_eigv_r, sorted_eigvals, _ = self.eigen_grid(vdT, N_div, steps_per_segment, a, b, phi1_ex, phi2_ex, rotation_angle, delta, initialise, fully_disorder)
-        theta_x = torch.linspace(0, 2*torch.pi, N_div+1, device=self.device).cpu().numpy()
-        theta_y = torch.linspace(0, 2*torch.pi, N_div+1, device=self.device).cpu().numpy()
+        thetax, thetay = self.get_theta_values(N_div, 'xy')
+        sorted_eigv_r, sorted_eigvals, _ = self.quasienergies_states_bulk(steps_per_segment, vdT, thetax, thetay, a, b, phi1_ex, phi2_ex, rotation_angle, delta, initialise, fully_disorder)
+        theta_x = thetax.cpu().numpy()
+        theta_y = thetay.cpu().numpy()
         fig = plt.figure(figsize=(20, 10))
         ax1 = fig.add_subplot(121, projection='3d')
         ax2 = fig.add_subplot(122, projection='polar')
@@ -2757,17 +2798,10 @@ class tb_floquet_tbc_cuda(nn.Module):
             plt.show()
         return W3_U_xi
     
-    def quasienergies_states_bulk(self, steps_per_segment, vdT, theta_x, theta_y, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, delta=None, initialise=False, fully_disorder=True):
+    def quasienergies_states_bulk(self, steps_per_segment, vdT, theta_x, theta_y, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
         """The quasi-energy spectrum for the bulk U(theta_x, theta_y, T) properties"""
         U = self.time_evolution_operator1(self.T, steps_per_segment, 'xy', vdT, rotation_angle, theta_x, theta_y, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
-        # U = self.time_evolution_operator(self.T, 'xy', vdT, rotation_angle, theta_x, theta_y, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
-        # print(U.shape)
-        # Perform eigendecomposition for each matrix in the batch
         eigvals, eigvecs = torch.linalg.eig(U)
-        ## Check original
-        # print("Original eigvecs shape:", eigvecs.shape)
-        # print("Original eigvecs norm:", torch.norm(eigvecs, dim=-2))
-        # print("Original eigvecs (first point):", eigvecs[-5, -5])
         del U
         torch.cuda.empty_cache()
         E_T = torch.log(eigvals).imag / self.T
@@ -2780,19 +2814,46 @@ class tb_floquet_tbc_cuda(nn.Module):
         sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
         expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
         sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
-        ## Check
-        # print("First sorted eigenvector (for verification):", sorted_eigvecs[-5, -5])
-        # print("Sorted eigenvectors shape:", sorted_eigvecs.shape)
-        # Check orthogonality
-        # dot_products = torch.matmul(sorted_eigvecs.transpose(-1, -2).conj(), sorted_eigvecs)
-        # off_diagonal = dot_products - torch.eye(dot_products.shape[-1], device=dot_products.device)
-        # print("Max off-diagonal element:", torch.max(torch.abs(off_diagonal)))
-        # print("Sorted eigenvectors norm:", torch.norm(sorted_eigvecs, dim=-2))
+        
         # Free up memory
         del eigvals, eigvecs, sorted_indices, expanded_indices
         torch.cuda.empty_cache()
+        
+        if plot:
+            # Plotting the surface
+            fig = plt.figure(figsize=(20, 8))
+            ax = fig.add_subplot(111, projection='3d')
+            
+            # Ensure theta_x and theta_y are tensors
+            if not isinstance(theta_x, torch.Tensor):
+                theta_x = torch.tensor(theta_x, device=sorted_eigv_r.device)
+            if not isinstance(theta_y, torch.Tensor):
+                theta_y = torch.tensor(theta_y, device=sorted_eigv_r.device)
+
+            X, Y = torch.meshgrid(theta_x.cpu(), theta_y.cpu(), indexing='ij')
+            X_np, Y_np = X.numpy(), Y.numpy()
+            sorted_eigv_r_np = sorted_eigv_r.cpu().numpy()
+
+            for i in range(sorted_eigv_r_np.shape[-1]):
+                ax.plot_surface(X_np, Y_np, sorted_eigv_r_np[:, :, i], cmap='viridis')
+
+            ax.set_xlabel(r'$\theta_x$', fontsize=25, labelpad=20)
+            ax.set_ylabel(r'$\theta_y$', fontsize=25, labelpad=20)
+            ax.set_zlabel(r'Quasienergy, $T\epsilon$', fontsize=25, labelpad=5)
+            ax.set_zlim(-torch.pi/self.T, torch.pi/self.T)
+            ax.set_xticks([0, torch.pi, 2*torch.pi])
+            ax.set_xticklabels(['0', r'$\pi$', r'$2\pi$'], fontsize=15)
+            ax.set_yticks([0, torch.pi, 2*torch.pi])
+            ax.set_yticklabels(['0', r'$\pi$', r'$2\pi$'], fontsize=15)
+            ax.set_zticks([-torch.pi/self.T, 0, torch.pi/self.T])
+            ax.set_zticklabels([r'$-\pi/T$', '0', r'$\pi/T$'], fontsize=15)
+            ax.view_init(elev=1, azim=15)
+            if save_path:
+                plt.tight_layout()
+                fig.savefig(save_path, format='pdf', bbox_inches='tight')
+            plt.show()
         return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
-    
+
     def log_with_branchcut1(self, z, epsilonT):
         """
         Compute the logarithm with a branch cut as defined in the AFAI paper.
@@ -3409,6 +3470,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         avg = torch.zeros(vdT_num, device=self.device)
 
         for _ in range(N_dis):
+            print("disorder configuration number:",_)
             self.H_disorder_cached = None  # Clear the cached disorder Hamiltonian
             avg_single = self.avg_level_spacing_bulk(steps_per_segment, vdT, delta=delta, fully_disorder=True)
             avg += avg_single
@@ -3612,7 +3674,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         return torch.diag(diagonal)
     
     def compute_deformed_U_edge(self, l1, l2, t, theta_num, steps_per_segment, vdT, rotation_angle=torch.pi/4, epsilonT=torch.pi, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, visualize=False):
-        thetax, thetay = self.get_theta_values(theta_num+1, 'x')
+        thetax, thetay = self.get_theta_values(theta_num, 'x')
         
         # First the time evolution operator defined on a cylinder
         U_t = self.time_evolution_operator1(t, steps_per_segment, 'x', vdT, rotation_angle, thetax, thetay, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
@@ -3659,52 +3721,141 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         return U_epsilon
     
-    def separate_edge_operators(self, U_epsilon, threshold=1e-10):
+    # def separate_edge_operators(self, U_epsilon, threshold=1e-10):
+    #     """
+    #     Separate U_1,ε and U_2,ε from the full U_epsilon matrix by identifying the identity block in the middle.
+        
+    #     Parameters:
+    #     U_epsilon (torch.Tensor): The full deformed evolution operator (complex128).
+    #     threshold (float): Threshold to determine closeness to 1 for diagonal elements.
+        
+    #     Returns:
+    #     tuple: (U_1_epsilon, U_2_epsilon)
+    #     """
+    #     N = U_epsilon.shape[-1]
+        
+    #     def is_identity(x):
+    #         return torch.isclose(torch.abs(x), torch.tensor(1.0, dtype=torch.float64), atol=threshold)
+        
+    #     # Find the start of the identity block
+    #     identity_start = 0
+    #     while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start]):
+    #         identity_start += 1
+        
+    #     # Find the end of the identity block
+    #     identity_end = N - 1
+    #     while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end]):
+    #         identity_end -= 1
+        
+    #     print(f"N: {N}")
+    #     print(f"identity_start: {identity_start}")
+    #     print(f"identity_end: {identity_end}")
+        
+    #     if identity_end < identity_start:
+    #         print("Warning: identity_end is less than identity_start")
+    #         print("Diagonal elements of U_epsilon:")
+    #         print(torch.diag(U_epsilon[0]))
+    #         return None, None  # or handle this case appropriately
+        
+    #     # Calculate the sizes of U_1 and U_2
+    #     u1_size = identity_start
+    #     u2_size = N - (identity_end + 1)
+        
+    #     # Balance the sizes
+    #     edge_size = max(u1_size, u2_size)
+        
+    #     # Extract U_1,ε and U_2,ε with balanced sizes
+    #     U_1_epsilon = U_epsilon[:, :edge_size, :edge_size]
+    #     U_2_epsilon = U_epsilon[:, -edge_size:, -edge_size:]
+        
+    #     print(f"Shape of U_1_epsilon: {U_1_epsilon.shape}")
+    #     print(f"Shape of U_2_epsilon: {U_2_epsilon.shape}")
+        
+    #     # Check off-diagonal elements in the supposed identity block
+    #     if identity_end >= identity_start:
+    #         off_diag_max = torch.max(torch.abs(U_epsilon[0, identity_start:identity_end+1, identity_start:identity_end+1] 
+    #                                         - torch.eye(identity_end-identity_start+1, dtype=U_epsilon.dtype, device=U_epsilon.device)))
+    #         print(f"Max off-diagonal element in identity block: {off_diag_max}")
+    #     else:
+    #         print("Cannot check off-diagonal elements: invalid identity block")
+        
+    #     return U_1_epsilon, U_2_epsilon
+    
+    def separate_edge_operators(self, U_epsilon, initial_threshold=1e-10, increment=1e-6):
         """
         Separate U_1,ε and U_2,ε from the full U_epsilon matrix by identifying the identity block in the middle.
         
         Parameters:
         U_epsilon (torch.Tensor): The full deformed evolution operator (complex128).
-        threshold (float): Threshold to determine closeness to 1 for diagonal elements.
+        initial_threshold (float): Initial threshold to determine closeness to 1 for diagonal elements.
+        increment (float): Increment to increase the threshold in case of failure.
         
         Returns:
         tuple: (U_1_epsilon, U_2_epsilon)
         """
         N = U_epsilon.shape[-1]
-        
-        # Function to check if a diagonal element is close to 1
-        def is_identity(x):
+
+        def is_identity(x, threshold):
             return torch.isclose(torch.abs(x), torch.tensor(1.0, dtype=torch.float64), atol=threshold)
-        
-        # Find the start of the identity block
-        identity_start = 0
-        while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start]):
-            identity_start += 1
-        
-        # Find the end of the identity block
-        identity_end = N - 1
-        while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end]):
-            identity_end -= 1
-   
+
+        threshold = initial_threshold
+        while True:
+            # Find the start of the identity block
+            identity_start = 0
+            while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start], threshold):
+                identity_start += 1
+
+            # Find the end of the identity block
+            identity_end = N - 1
+            while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end], threshold):
+                identity_end -= 1
+
+            print(f"Threshold: {threshold}")
+            print(f"N: {N}")
+            print(f"identity_start: {identity_start}")
+            print(f"identity_end: {identity_end}")
+
+            if identity_end >= identity_start:
+                break  # Exit the loop if the condition is satisfied
+
+            # Increase the threshold
+            threshold += increment
+
+        if identity_end < identity_start:
+            print("Failed to separate edge operators within the maximum number of attempts.")
+            print("Diagonal elements of U_epsilon:")
+            print(torch.diag(U_epsilon[0]))
+            return None, None  # or handle this case appropriately
+
         # Calculate the sizes of U_1 and U_2
         u1_size = identity_start
         u2_size = N - (identity_end + 1)
-        
+
         # Balance the sizes
         edge_size = max(u1_size, u2_size)
+
         # Extract U_1,ε and U_2,ε with balanced sizes
         U_1_epsilon = U_epsilon[:, :edge_size, :edge_size]
         U_2_epsilon = U_epsilon[:, -edge_size:, -edge_size:]
-        
-        # print(f"Identity block found from {identity_start} to {identity_end}")
-        # print(f"Shape of U_1_epsilon: {U_1_epsilon.shape}")
-        # print(f"Shape of U_2_epsilon: {U_2_epsilon.shape}")
-        
+
+        print(f"Shape of U_1_epsilon: {U_1_epsilon.shape}")
+        print(f"Shape of U_2_epsilon: {U_2_epsilon.shape}")
+
         # Check off-diagonal elements in the supposed identity block
-        off_diag_max = torch.max(torch.abs(U_epsilon[0, identity_start:identity_end+1, identity_start:identity_end+1] - torch.eye(identity_end-identity_start+1, dtype=U_epsilon.dtype, device=U_epsilon.device)))
-        # print(f"Max off-diagonal element in identity block: {off_diag_max}")
-        
+        if identity_end >= identity_start:
+            identity_block = U_epsilon[0, identity_start:identity_end+1, identity_start:identity_end+1]
+            off_diag_max = torch.max(torch.abs(identity_block - torch.eye(identity_block.shape[0], dtype=U_epsilon.dtype, device=U_epsilon.device)))
+            print(f"Max off-diagonal element in identity block: {off_diag_max}")
+            
+            # Detailed inspection of off-diagonal elements
+            off_diag_elements = torch.abs(identity_block - torch.eye(identity_block.shape[0], dtype=U_epsilon.dtype, device=U_epsilon.device))
+            print("Off-diagonal elements:")
+            print(off_diag_elements)
+        else:
+            print("Cannot check off-diagonal elements: invalid identity block")
+
         return U_1_epsilon, U_2_epsilon
+
     
     def calculate_edge_winding_number(self, l1, l2, t, theta_num, steps_per_segment, vdT, 
                                   rotation_angle=torch.pi/4, epsilonT=torch.pi, 
@@ -3721,7 +3872,7 @@ class tb_floquet_tbc_cuda(nn.Module):
                                                 delta, initialise, fully_disorder, visualize)
         
         # Separate U1 and U2
-        U1, U2 = self.separate_edge_operators(U_epsilon, threshold=tolerance)
+        U1, U2 = self.separate_edge_operators(U_epsilon, initial_threshold=tolerance)
 
         def compute_winding_number(U_edge):
             # Compute step size
@@ -3747,6 +3898,56 @@ class tb_floquet_tbc_cuda(nn.Module):
         n_edge_2 = compute_winding_number(U2)
 
         return n_edge_1, n_edge_2
+    
+    def plot_edge_invariant_vs_vdT(self, l1, l2, t, theta_num, steps_per_segment, vdT_range, 
+                               rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, 
+                               delta=None, initialise=False, fully_disorder=True, tolerance=1e-10):
+        """
+        Generate a plot of edge invariant versus the aperiodic strength, vdT,
+        for two branch cut values ξ=0 and π.
+        """
+        xi_values = torch.tensor([0, torch.pi], device=self.device)
+        edge_invariant_values = torch.zeros((len(vdT_range), len(xi_values)), device=self.device)
+
+        for i, vdT in enumerate(vdT_range):
+            for j, xi in enumerate(xi_values):
+                n_edge_1, n_edge_2 = self.calculate_edge_winding_number(
+                    l1, l2, t, theta_num, steps_per_segment, vdT,
+                    rotation_angle=rotation_angle, epsilonT=xi,
+                    a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex,
+                    delta=delta, initialise=initialise, fully_disorder=fully_disorder,
+                    visualize=False, tolerance=tolerance
+                )
+                n_edge_1 = torch.tensor(n_edge_1, device=self.device)
+                n_edge_2 = torch.tensor(n_edge_2, device=self.device)
+
+                # Get the larger value in absolute terms using PyTorch
+                larger_value = torch.max(torch.abs(n_edge_1), torch.abs(n_edge_2))
+                edge_invariant_values[i, j] = larger_value
+
+            torch.cuda.empty_cache()
+
+        # Convert to numpy arrays for plotting
+        vdT_np = vdT_range.cpu().numpy() if isinstance(vdT_range, torch.Tensor) else np.array(vdT_range)
+        edge_invariant_values_np = edge_invariant_values.cpu().numpy()
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        legend_fontsize = 32
+        # Create the plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(vdT_np, edge_invariant_values_np[:, 0], label='ξ = 0', marker='o')
+        plt.plot(vdT_np, edge_invariant_values_np[:, 1], label='ξ = π', marker='s')
+        plt.xlabel('Aperiodic Strength (vdT)', fontsize=label_fontsize)
+        plt.ylabel('Edge Invariant', fontsize=label_fontsize)
+        # plt.title('Edge Invariant vs Aperiodic Strength')
+        plt.ylim(-1.5, 1.5)
+        plt.legend(fontsize=legend_fontsize)
+        plt.xticks(fontsize=tick_label_fontsize)
+        plt.yticks(fontsize=tick_label_fontsize)
+        plt.grid(True)
+        plt.show()
+
+        return edge_invariant_values
     
     ## Evolving a delta wavefunction --> Transmission probability
     def taylor_expansion_single(self, H, t, i):
