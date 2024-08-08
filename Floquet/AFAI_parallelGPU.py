@@ -1953,6 +1953,84 @@ class tb_floquet_tbc_cuda(nn.Module):
         else:
             return H_aperiodic.squeeze()
     
+    def compute_mu(self, args):
+        x, y, a, b, phi1_ex, phi2_ex, theta = args
+        u = x * torch.cos(theta) - y * torch.sin(theta)
+        v = x * torch.sin(theta) + y * torch.cos(theta)
+        phi1 = 2 * np.pi * (a * torch.cos(theta).item() - b * torch.sin(theta).item())
+        phi2 = 2 * np.pi * (a * torch.sin(theta).item() + b * torch.cos(theta).item())
+        return torch.cos(2 * np.pi * u + phi1 + phi1_ex) + torch.cos(2 * np.pi * v + phi2 + phi2_ex)
+    
+    def quasip_continuum(self, x, y, a, b, phi1_ex, phi2_ex, rotation_angle):
+        lx = len(x)
+        ly = len(y)
+        mu = np.zeros((lx, ly), dtype=float)
+        
+        # Create a list of arguments for each combination of x[i] and y[j]
+        args_list = [(x[i], y[j], a, b, phi1_ex, phi2_ex, rotation_angle) for i in range(lx) for j in range(ly)]
+        
+        # Use ThreadPoolExecutor to parallelize the computation, limiting the number of threads
+        max_threads = min(32, len(args_list))  # Adjust the number of threads as needed
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            results = list(executor.map(self.compute_mu, args_list))
+        # Reshape the results back into the mu matrix
+        for index, value in enumerate(results):
+            i = index % lx
+            j = index // lx
+            mu[i, j] = value
+        return mu
+        
+    def visualise_quasiperiodic(self, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, grid_density = 100, save_path=None):
+        """
+        Visualize a 2D square lattice with nx x ny sites. Each lattice site is represented by a hollow circle with a dashed outline.
+        The contour plot is centered at ((self.nx - 1)/2, (self.ny - 1)/2).
+        """
+        rotation_angle = rotation_angle.to(self.device) if isinstance(rotation_angle, torch.Tensor) else torch.tensor(rotation_angle, device=self.device)
+        fig, ax = plt.subplots(figsize=(8, 8))
+        
+        # Create a denser grid for the contour plot, centered at ((self.nx - 1)/2, (self.ny - 1)/2)
+        x_dense = np.linspace(-1, self.nx, grid_density) - (self.nx - 1) / 2
+        y_dense = np.linspace(-1, self.ny, grid_density) - (self.ny - 1) / 2
+
+        # Compute the quasiperiodic potential on the denser grid
+        mu = self.quasip_continuum(x_dense, y_dense, a, b, phi1_ex, phi2_ex, rotation_angle)
+
+        # Plot the contour
+        X_contour, Y_contour = np.meshgrid(x_dense + (self.nx - 1) / 2, y_dense + (self.ny - 1) / 2, indexing='ij')
+        ax.contourf(X_contour, Y_contour, mu, levels=15, cmap='viridis')
+        # Set limits and aspect ratio
+        ax.set_xlim(-1, self.nx)
+        ax.set_ylim(-1, self.ny)
+        ax.set_aspect('equal')
+        # Set tick positions and labels for x and y axes, excluding -1
+        x_ticks = np.arange(0, self.nx, 1)
+        y_ticks = np.arange(0, self.ny, 1)
+        
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels(x_ticks, fontsize=14)  # Set font size for x-axis tick labels
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels(y_ticks, fontsize=14)  # Set font size for y-axis tick labels
+        # Generate coordinates for the lattice points using torch
+        x_coords, y_coords = torch.meshgrid(torch.arange(self.nx), torch.arange(self.ny), indexing='ij')
+        
+        # Flatten the coordinates for easier plotting
+        x_coords = x_coords.flatten().cpu().numpy()
+        y_coords = y_coords.flatten().cpu().numpy()
+        
+        # Plot hollow circles at each lattice point
+        for x, y in zip(x_coords, y_coords):
+            circle = plt.Circle((x, y), 0.3, edgecolor='black', facecolor='none', linestyle='--', linewidth=1.5)
+            ax.add_patch(circle)
+        
+        # Remove axis labels and ticks
+        # ax.set_xticks([])
+        # ax.set_yticks([])
+        
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, format='pdf', bbox_inches='tight')
+        plt.show()
+    
     def check_diagonal_symmetry(self, H_ap):
         """
         Check if the matrix H_ap is symmetric along the main diagonal and the anti-diagonal.
@@ -3941,6 +4019,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         plt.ylabel('Edge Invariant', fontsize=label_fontsize)
         # plt.title('Edge Invariant vs Aperiodic Strength')
         plt.ylim(-1.5, 1.5)
+        plt.yticks(range(-1, 2))  # This sets integer ticks from -1 to 1
         plt.legend(fontsize=legend_fontsize)
         plt.xticks(fontsize=tick_label_fontsize)
         plt.yticks(fontsize=tick_label_fontsize)
@@ -4484,7 +4563,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Apply the sorting to eigvecs
         expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
         eigvecs_sorted = torch.gather(eigvecs, -1, expanded_indices)
-        # If you need to squeeze the results
+        # If need to squeeze the results
         # eigvecs_sorted = eigvecs_sorted.squeeze()
         # print("Sorted eigvecs shape:", eigvecs_sorted.shape)
         # print("Sorted eigvecs norm:", torch.norm(eigvecs_sorted, dim=-2))
@@ -4802,5 +4881,4 @@ class tb_floquet_tbc_cuda(nn.Module):
         plt.title('Quantized Charge Pumping vs. vdT Tensor')
         plt.grid(True)
         plt.show()
-    
         
