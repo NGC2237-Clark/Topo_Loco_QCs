@@ -2019,7 +2019,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         # Plot hollow circles at each lattice point
         for x, y in zip(x_coords, y_coords):
-            circle = plt.Circle((x, y), 0.3, edgecolor='black', facecolor='none', linestyle='--', linewidth=1.5)
+            circle = plt.Circle((x, y), 0.1, edgecolor='black', facecolor='none', linestyle='--', linewidth=1.5)
             ax.add_patch(circle)
         
         # Remove axis labels and ticks
