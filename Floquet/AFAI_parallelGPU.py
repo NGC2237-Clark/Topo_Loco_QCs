@@ -3231,6 +3231,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         xi_values = torch.tensor([0, torch.pi], device=self.device)
         W3_values = torch.zeros((len(vdT), len(xi_values)), device=self.device)
         for i, aperiodic_strength in enumerate(vdT):
+            print(f"Computing vdT value {i+1}/{len(vdT)}")
             for j, xi in enumerate(xi_values):
                 # Compute the deformed U for this ξ value
                 U_xi = self.compute_deformed_U(t_num, theta_num, steps_per_segment, aperiodic_strength, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, epsilonT=xi, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
@@ -4202,126 +4203,14 @@ class tb_floquet_tbc_cuda(nn.Module):
         return edge_invariant_values
     
     ## Evolving a delta wavefunction --> Transmission probability
-    def taylor_expansion_single(self, H, t, i):
-        '''Compute a single term in the Taylor expansion'''
-        return 1 / np.math.factorial(i) * (-1j * t) ** i * torch.matrix_power(H, i)
-    
-    def taylor_expansion(self, H, t, n):
-        '''Taylor expansion of exp(-iHt) using multiple threads'''
-        U = torch.zeros_like(H, dtype=torch.complex128)
-        
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self.taylor_expansion_single, H, t, i) for i in range(n + 1)]
-            
-            for future in futures:
-                U += future.result()
-        
-        return U
-
-    def time_evolution_1period(self, n, tbc, vdT, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True):
-        # Ensure vdT is a tensor
-        if isinstance(vdT, (int, float)):
-            vdT = torch.tensor([vdT], device=self.device)
-        elif not isinstance(vdT, torch.Tensor):
-            vdT = torch.tensor(vdT, device=self.device)
-        else:
-            vdT = vdT.to(self.device)
-        vdT = vdT.reshape(-1, 1, 1)
-
-        H_onsite = self.Hamiltonian_onsite(vdT, rotation_angle, a, b, phi1, phi2, delta, initialise, fully_disorder)
-        H1 = self.Hamiltonian_tbc1(theta_x, tbc).unsqueeze(0) + H_onsite
-        H2 = self.Hamiltonian_tbc2(theta_y, tbc).unsqueeze(0) + H_onsite
-        H3 = self.Hamiltonian_tbc3(theta_x, tbc).unsqueeze(0) + H_onsite
-        H4 = self.Hamiltonian_tbc4(theta_y, tbc).unsqueeze(0) + H_onsite
-        H5 = H_onsite
-
-        batch_size = vdT.shape[0]
-        U_batch = []
-
-        for b in range(batch_size):
-            H11 = H1[b].cpu()
-            H22 = H2[b].cpu()
-            H33 = H3[b].cpu()
-            H44 = H4[b].cpu()
-            H55 = H5[b].cpu()
-            
-            is_unitary = False
-            n_local = n
-            while not is_unitary:
-                U1 = self.taylor_expansion(H11, self.T / 5, n_local)
-                U2 = self.taylor_expansion(H22, self.T / 5, n_local)
-                U3 = self.taylor_expansion(H33, self.T / 5, n_local)
-                U4 = self.taylor_expansion(H44, self.T / 5, n_local)
-                U5 = self.taylor_expansion(H55, self.T / 5, n_local)
-                U = U5 @ U4 @ U3 @ U2 @ U1
-                U_dagger = U.conj().T
-                product = U @ U_dagger
-                identity = torch.eye(self.nx * self.ny, dtype=torch.complex128)
-                is_unitary = torch.allclose(product, identity, atol=1e-10)
-                print(n_local)
-                n_local += 1
-            
-            U_batch.append(U)
-
-        return torch.stack([u.to(self.device) for u in U_batch])
-    
     def infinitesimal_evol_operator(self, Hr, V_dis, dt):
         '''The infinitesimal evolution operator for the real space Hamiltonian'''
         U = torch.matrix_exp(-1j * (Hr) * dt/2) @ torch.matrix_exp(-1j * (V_dis) * dt) @ torch.matrix_exp(-1j * (Hr) * dt/2)
         return U
     
-    def time_evol_op(self, N, steps_per_segment, tbc, vdT, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True):
-        '''Time evolution operator over N periods (t = N * T) with specified steps per T/5 segment for time-periodic Hamiltonian'''
-        # Handle both scalar and tensor vdT
-        if isinstance(vdT, (int, float)):
-            vdT = torch.tensor([vdT], device=self.device)
-        elif not isinstance(vdT, torch.Tensor):
-            vdT = torch.tensor(vdT, device=self.device)
-        
-        # Ensure vdT is a 3D tensor
-        if vdT.dim() == 1:
-            vdT = vdT.unsqueeze(1).unsqueeze(2)
-        elif vdT.dim() == 2:
-            vdT = vdT.unsqueeze(2)
-        
-        batch_size = vdT.shape[0]
-        
-        # Calculate dt based on steps_per_segment
-        dt = self.T / (5 * steps_per_segment)
-        
-        H_onsite = self.Hamiltonian_onsite(vdT, rotation_angle, a, b, phi1, phi2, delta, initialise, fully_disorder)
-        H1 = self.Hamiltonian_tbc1(theta_x, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        H2 = self.Hamiltonian_tbc2(theta_y, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        H3 = self.Hamiltonian_tbc3(theta_x, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        H4 = self.Hamiltonian_tbc4(theta_y, tbc).unsqueeze(0).expand(batch_size, -1, -1)
-        
-        def evolve_one_period():
-            print("Evolve one period")
-            U_period = torch.eye(self.nx * self.ny, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(batch_size, -1, -1)
-            print("steps_per_segment", steps_per_segment)
-
-            # Stack all Hamiltonians into a single tensor
-            H_stack = torch.stack([torch.zeros_like(H1), H4, H3, H2, H1], dim=0)
-
-            for _ in range(steps_per_segment):
-                # Apply infinitesimal_evol_operator to all Hamiltonians at once
-                U_steps = self.infinitesimal_evol_operator(H_stack, H_onsite.unsqueeze(0).expand(5, -1, -1, -1), dt)
-                
-                # Multiply U_period with all U_steps
-                for U_step in U_steps:
-                    U_period = U_step @ U_period
-
-            return U_period
-
-        # Evolve for N periods
-        U_one_period = evolve_one_period()
-        U = torch.matrix_power(U_one_period, N)
-
-        return U
-    
     def real_time_trans(self, N_times, steps_per_segment, initial_position, tbc, vdT, rotation_angle=torch.pi/4, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, fully_disorder=True):
         """The real time transmission Amplitude of evolved initial wavepacket at given initial_position (input) over N_times period"""
-        U = self.time_evol_op(N_times, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
+        U = self.time_evolution_operator1(self.T * N_times, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
         
         batch_size = U.shape[0]
         num_sites = U.shape[1]
@@ -4359,7 +4248,8 @@ class tb_floquet_tbc_cuda(nn.Module):
         vdT = vdT.view(vdT_size, 1)
         
         # Compute U for one period
-        U_one_period = self.time_evol_op(1, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
+        # U_one_period = self.time_evol_op(1, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
+        U_one_period = self.time_evolution_operator1(self.T, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
         # print('U_one_period shape', U_one_period.shape)
         # Compute powers of U_one_period for all required periods
         U_powers = [torch.eye(num_sites, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(vdT_size, -1, -1)]
@@ -4455,7 +4345,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         for N in range(N_dis):
             self.H_disorder_cached = None  # Clear the cached disorder Hamiltonian
-            print(N)
+            print('number of disorder realisation', N)
             
             trans_prob_single = self.transmission_prob(N_max, steps_per_segment, initial_position, energy, tbc, vdT, delta=delta, fully_disorder=True)
             # Explicitly squeeze out the singleton dimension
@@ -4471,7 +4361,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         del avg
         torch.cuda.empty_cache()
         
-        return avg_tp
+        return avg_tp.squeeze()
     
     ## The following two functions "real_trans_prob_avg_phase" and "trans_prob_avg_phase_realisation" only deal with the aperiodic case
     def real_trans_prob_avg_phase(self, N_phi, N_times, steps_per_segment, initial_pos, tbc, vdT, rotation_angle=np.pi/4, theta_x=0, theta_y=0, a=0, b=0, delta=None):
