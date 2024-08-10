@@ -1609,8 +1609,6 @@ class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice wi
         plt.show()
         return bulk_invariant_values
         
-        
-        
 class tb_floquet_tbc_cuda(nn.Module):
     def __init__(self, period, lattice_constant, J_coe, ny, nx=2, device=None):
         super(tb_floquet_tbc_cuda, self).__init__()
@@ -3256,7 +3254,55 @@ class tb_floquet_tbc_cuda(nn.Module):
         plt.grid(True)
         plt.show()
         return W3_values
-                
+    
+    def plot_W3_vdT_disorder_realisation(self, theta_num, t_num, steps_per_segment, vdT, N_dis, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, delta=None, initialise=False):
+        """
+        Generate a plot of disorder-averaged W₃[Uξ] versus the aperiodic strength, vdT where only two branch cut values ξ=0 and π are chosen.
+        """
+        xi_values = torch.tensor([0, torch.pi], device=self.device)
+        W3_values = torch.zeros((len(vdT), len(xi_values)), device=self.device)
+        
+        for i, aperiodic_strength in enumerate(vdT):
+            for j, xi in enumerate(xi_values):
+                W3_sum = 0
+                for _ in range(N_dis):
+                    self.H_disorder_cached = None  # Clear the cached disorder Hamiltonian
+                    gc.collect()  # Force garbage collection
+                    torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+                    
+                    # Compute the deformed U for this ξ value and disorder realization
+                    U_xi = self.compute_deformed_U(t_num, theta_num, steps_per_segment, aperiodic_strength, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, epsilonT=xi, delta=delta, initialise=initialise, fully_disorder=True)
+                    
+                    # Compute W₃[Uξ] for this ξ value
+                    W3 = self.compute_winding_number(U_xi)
+                    W3_sum += W3
+                    
+                    del U_xi, W3  # Delete variables to free memory
+                    gc.collect()  # Force garbage collection
+                    torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+                    
+                # Average over disorder realizations
+                W3_values[i, j] = W3_sum / N_dis
+                print(f"Completed vdT value {i+1}/{len(vdT)}, ξ = {'0' if j == 0 else 'π'}")  # Progress indicator
+        
+        # Convert tensors to numpy arrays for plotting
+        vdT_np = vdT.cpu().numpy()
+        W3_values_np = W3_values.cpu().numpy()
+        
+        # Create the plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(vdT_np, W3_values_np[:, 0], label='ξ = 0', marker='o')
+        plt.plot(vdT_np, W3_values_np[:, 1], label='ξ = π', marker='s')
+        plt.ylim(-1.5, 1.5)
+        plt.yticks(range(-1, 2))  # This sets integer ticks from -1 to 1
+        plt.xlabel('Aperiodic Strength (vdT)')
+        plt.ylabel('Winding Number W₃[Uξ]')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+        
+        return W3_values
+    
     ## Now rewrite the above few function without batch processing but calculate every scalar thetax, thetay and t values. (Take very long time.....)
     def compute_deformed_U_single(self, t, theta_x, theta_y, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
         """
@@ -3859,12 +3905,13 @@ class tb_floquet_tbc_cuda(nn.Module):
         
     #     return U_1_epsilon, U_2_epsilon
     
-    def separate_edge_operators(self, U_epsilon, initial_threshold=1e-10, increment=1e-6):
+    def separate_edge_operators(self, U_epsilon, l2, initial_threshold=1e-10, increment=1e-6):
         """
         Separate U_1,ε and U_2,ε from the full U_epsilon matrix by identifying the identity block in the middle.
         
         Parameters:
         U_epsilon (torch.Tensor): The full deformed evolution operator (complex128).
+        l2 (int): Index offset for identity block determination.
         initial_threshold (float): Initial threshold to determine closeness to 1 for diagonal elements.
         increment (float): Increment to increase the threshold in case of failure.
         
@@ -3878,13 +3925,16 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         threshold = initial_threshold
         while True:
+            # Initialize identity_start and identity_end based on l2 and self.nx
+            identity_start = l2 * self.nx
+            # identity_start = 0 
+            identity_end = N - 1 - self.nx * l2
+            # identity_end = N - 1
             # Find the start of the identity block
-            identity_start = 0
             while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start], threshold):
                 identity_start += 1
 
             # Find the end of the identity block
-            identity_end = N - 1
             while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end], threshold):
                 identity_end -= 1
 
@@ -3933,7 +3983,6 @@ class tb_floquet_tbc_cuda(nn.Module):
             print("Cannot check off-diagonal elements: invalid identity block")
 
         return U_1_epsilon, U_2_epsilon
-
     
     def calculate_edge_winding_number(self, l1, l2, t, theta_num, steps_per_segment, vdT, 
                                   rotation_angle=torch.pi/4, epsilonT=torch.pi, 
@@ -3950,7 +3999,7 @@ class tb_floquet_tbc_cuda(nn.Module):
                                                 delta, initialise, fully_disorder, visualize)
         
         # Separate U1 and U2
-        U1, U2 = self.separate_edge_operators(U_epsilon, initial_threshold=tolerance)
+        U1, U2 = self.separate_edge_operators(U_epsilon, l2, initial_threshold=tolerance)
 
         def compute_winding_number(U_edge):
             # Compute step size
@@ -3977,9 +4026,71 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         return n_edge_1, n_edge_2
     
-    def plot_edge_invariant_vs_vdT(self, l1, l2, t, theta_num, steps_per_segment, vdT_range, 
-                               rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, 
-                               delta=None, initialise=False, fully_disorder=True, tolerance=1e-10):
+    def convergence_edge_invariant(self, l1, l2, t, grid_num_range, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, tolerance=1e-10, save_path=None):
+        """
+        Convergence test for the edge invariant with respect to the grid resolution in θ (theta_num).
+        
+        Parameters:
+        - l1, l2: Indices used for the edge operator separation.
+        - t: Time parameter.
+        - grid_num_range: List or tensor of theta_num values to test for convergence.
+        - steps_per_segment: Number of steps per segment (fixed across tests).
+        - vdT: Fixed value of aperiodic strength to test.
+        - rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder, tolerance: Parameters for the edge winding number calculation.
+        - save_path: Path to save the plot (optional).
+        
+        Returns:
+        - edge_invariant_values: Tensor of computed edge invariants for each grid size and branch cut value.
+        """
+        print('theta_num grid', grid_num_range)
+        xi_values = torch.tensor([0, torch.pi], device=self.device)
+        edge_invariant_values = torch.zeros((len(grid_num_range), len(xi_values)), device=self.device)
+        
+        for i, theta_num in enumerate(grid_num_range):
+            for j, xi in enumerate(xi_values):
+                print(f"Computing for theta_num {theta_num}, ξ = {'0' if j == 0 else 'π'}")
+                n_edge_1, n_edge_2 = self.calculate_edge_winding_number(
+                    l1, l2, t, theta_num=theta_num, steps_per_segment=steps_per_segment, vdT=vdT,
+                    rotation_angle=rotation_angle, epsilonT=xi,
+                    a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex,
+                    delta=delta, initialise=initialise, fully_disorder=fully_disorder,
+                    visualize=False, tolerance=tolerance
+                )
+                n_edge_1 = torch.tensor(n_edge_1, device=self.device)
+                n_edge_2 = torch.tensor(n_edge_2, device=self.device)
+                
+                # Get the larger value in absolute terms using PyTorch
+                larger_value = torch.max(torch.abs(n_edge_1), torch.abs(n_edge_2))
+                edge_invariant_values[i, j] = larger_value
+                
+                torch.cuda.empty_cache()
+        
+        # Convert to numpy arrays for plotting
+        grid_np = grid_num_range.cpu().numpy() if isinstance(grid_num_range, torch.Tensor) else np.array(grid_num_range)
+        edge_invariant_values_np = edge_invariant_values.cpu().numpy()
+        
+        # Plotting
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        legend_fontsize = 32
+        
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.plot(grid_np, edge_invariant_values_np[:, 0], label=r'$\varepsilon = 0$', marker='o')
+        ax.plot(grid_np, edge_invariant_values_np[:, 1], label=r'$\varepsilon = \pi$', marker='s')
+        ax.set_xlabel(r'$\theta_{\mathrm{num}}$', fontsize=label_fontsize)
+        ax.set_ylabel(r'Edge Invariant $W_3[U_\varepsilon]$', fontsize=label_fontsize)
+        ax.legend(fontsize=legend_fontsize)
+        ax.tick_params(axis='both', which='major', labelsize=tick_label_fontsize)
+        ax.grid(True)
+        
+        if save_path:
+            plt.tight_layout()
+            fig.savefig(save_path, format='pdf', bbox_inches='tight')
+        
+        plt.show()
+        return edge_invariant_values
+    
+    def plot_edge_invariant_vs_vdT(self, l1, l2, t, theta_num, steps_per_segment, vdT_range, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, tolerance=1e-10):
         """
         Generate a plot of edge invariant versus the aperiodic strength, vdT,
         for two branch cut values ξ=0 and π.
@@ -4026,6 +4137,68 @@ class tb_floquet_tbc_cuda(nn.Module):
         plt.grid(True)
         plt.show()
 
+        return edge_invariant_values
+
+    def plot_edge_invariant_vs_vdT_disorder_realisation(self, l1, l2, t, theta_num, steps_per_segment, vdT_range, N_dis, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, tolerance=1e-10):
+        """
+        Generate a plot of disorder-averaged edge invariant versus the aperiodic strength, vdT,
+        for two branch cut values ξ=0 and π.
+        """
+        xi_values = torch.tensor([0, torch.pi], device=self.device)
+        edge_invariant_values = torch.zeros((len(vdT_range), len(xi_values)), device=self.device)
+
+        for i, vdT in enumerate(vdT_range):
+            for j, xi in enumerate(xi_values):
+                edge_invariant_sum = 0
+                for _ in range(N_dis):
+                    self.H_disorder_cached = None  # Clear the cached disorder Hamiltonian
+                    gc.collect()  # Force garbage collection
+                    torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+
+                    n_edge_1, n_edge_2 = self.calculate_edge_winding_number(
+                        l1, l2, t, theta_num, steps_per_segment, vdT,
+                        rotation_angle=rotation_angle, epsilonT=xi,
+                        a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex,
+                        delta=delta, initialise=initialise, fully_disorder=fully_disorder,
+                        visualize=False, tolerance=tolerance
+                    )
+                    n_edge_1 = torch.tensor(n_edge_1, device=self.device)
+                    n_edge_2 = torch.tensor(n_edge_2, device=self.device)
+
+                    # Get the larger value in absolute terms using PyTorch
+                    larger_value = torch.max(torch.abs(n_edge_1), torch.abs(n_edge_2))
+                    edge_invariant_sum += larger_value
+
+                    del n_edge_1, n_edge_2, larger_value
+                    gc.collect()  # Force garbage collection
+                    torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+                
+                # Average over disorder realizations
+                edge_invariant_values[i, j] = edge_invariant_sum / N_dis
+
+            print(f"Completed vdT value {i+1}/{len(vdT_range)}, ξ = {'0' if j == 0 else 'π'}")  # Progress indicator
+
+        # Convert to numpy arrays for plotting
+        vdT_np = vdT_range.cpu().numpy() if isinstance(vdT_range, torch.Tensor) else np.array(vdT_range)
+        edge_invariant_values_np = edge_invariant_values.cpu().numpy()
+        
+        # Plotting
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        legend_fontsize = 32
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(vdT_np, edge_invariant_values_np[:, 0], label='ξ = 0', marker='o')
+        plt.plot(vdT_np, edge_invariant_values_np[:, 1], label='ξ = π', marker='s')
+        plt.xlabel('Aperiodic Strength (vdT)', fontsize=label_fontsize)
+        plt.ylabel('Edge Invariant', fontsize=label_fontsize)
+        plt.ylim(-1.5, 1.5)
+        plt.yticks(range(-1, 2))
+        plt.legend(fontsize=legend_fontsize)
+        plt.xticks(fontsize=tick_label_fontsize)
+        plt.yticks(fontsize=tick_label_fontsize)
+        plt.grid(True)
+        plt.show()
         return edge_invariant_values
     
     ## Evolving a delta wavefunction --> Transmission probability
@@ -4146,7 +4319,7 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         return U
     
-    def real_time_trans(self, N_times, steps_per_segment, initial_position, tbc, vdT, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, fully_disorder=True):
+    def real_time_trans(self, N_times, steps_per_segment, initial_position, tbc, vdT, rotation_angle=torch.pi/4, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, fully_disorder=True):
         """The real time transmission Amplitude of evolved initial wavepacket at given initial_position (input) over N_times period"""
         U = self.time_evol_op(N_times, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
         
@@ -4162,73 +4335,68 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         return Ua
     
-    def transmission_prob(self, N_max, steps_per_segment, initial_position, energy, tbc, vdT, rotation_angle, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, fully_disorder=True):
+    def transmission_prob(self, N_max, steps_per_segment, initial_position, energy, tbc, vdT, rotation_angle=torch.pi/4, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, fully_disorder=True):
         # Ensure vdT is a tensor
         if isinstance(vdT, (int, float)):
             vdT = torch.tensor([vdT], device=self.device)
         elif not isinstance(vdT, torch.Tensor):
             vdT = torch.tensor(vdT, device=self.device)
+        elif isinstance(vdT, torch.Tensor):
+            vdT = vdT.to(self.device)
         
         # Ensure energy is a tensor
         if isinstance(energy, (int, float)):
             energy = torch.tensor([energy], device=self.device)
         elif not isinstance(energy, torch.Tensor):
             energy = torch.tensor(energy, device=self.device)
-        
-        # Ensure phi1 and phi2 are tensors
-        if isinstance(phi1, (int, float)):
-            phi1 = torch.tensor([phi1], device=self.device)
-        elif not isinstance(phi1, torch.Tensor):
-            phi1 = torch.tensor(phi1, device=self.device)
-        
-        if isinstance(phi2, (int, float)):
-            phi2 = torch.tensor([phi2], device=self.device)
-        elif not isinstance(phi2, torch.Tensor):
-            phi2 = torch.tensor(phi2, device=self.device)
+        elif isinstance(energy, torch.Tensor):
+            energy = energy.to(self.device)
         
         vdT_size = vdT.shape[0]
-        energy_size = energy.shape[0]
-        phi_size = max(phi1.shape[0], phi2.shape[0])
         num_sites = self.nx * self.ny
         
-        # Reshape vdT, energy, phi1, and phi2 for broadcasting
-        vdT = vdT.view(vdT_size, 1, 1, 1)
-        energy = energy.view(1, energy_size, 1, 1)
-        phi1 = phi1.view(1, 1, phi_size, 1)
-        phi2 = phi2.view(1, 1, phi_size, 1)
+        # Reshape vdT, energy for broadcasting
+        vdT = vdT.view(vdT_size, 1)
         
         # Compute U for one period
         U_one_period = self.time_evol_op(1, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
-        
+        # print('U_one_period shape', U_one_period.shape)
         # Compute powers of U_one_period for all required periods
-        U_powers = [torch.eye(num_sites, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(vdT_size, phi_size, -1, -1)]
+        U_powers = [torch.eye(num_sites, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(vdT_size, -1, -1)]
         for _ in range(N_max):
             U_powers.append(torch.matmul(U_powers[-1], U_one_period))
         
         # Stack all U_powers
         U_all_periods = torch.stack(U_powers)
-        
+        # print('U_all_periods shape', U_all_periods.shape)
         # Create initial state vector
-        vector = torch.zeros((vdT_size, phi_size, num_sites), dtype=torch.complex128, device=self.device)
-        vector[:, :, initial_position - 1] = 1.0
-        
+        vector = torch.zeros((vdT_size, num_sites), dtype=torch.complex128, device=self.device)
+        vector[:, initial_position - 1] = 1.0
+        # print('vector shape', vector.shape)
         # Compute G for all periods at once
         G_all = torch.matmul(U_all_periods, vector.unsqueeze(-1)).squeeze(-1)
-        G_all = G_all.view(N_max + 1, vdT_size, phi_size, num_sites)
-        
+        G_all = G_all.view(N_max + 1, vdT_size, num_sites) # Shape [periods, vdT, number_sites]
+        # print('G_all shape',G_all.shape)
         # Compute complex exponentials for all periods at once
-        nn = torch.arange(N_max + 1, device=self.device)
-        complex_exponent = 1j * energy * nn.unsqueeze(1) * self.T
-        
+        nn = torch.arange(N_max + 1, device=self.device).view(1, -1, 1) # Shape [energy, Period, vdT, 1, 1]
+        # print('nn shape', nn.shape)
+        energy = energy.view(-1, 1, 1)
+        # print('energy shape', energy.shape)
+        complex_exponent = 1j * energy * nn * self.T
+        # complex_exponent = 1j * energy * nn.unsqueeze(1) * self.T
+        # print('complex_exponent shape', complex_exponent.shape)
         # Compute G_aa
-        G_aa = torch.sum(G_all.unsqueeze(1) * torch.exp(complex_exponent).unsqueeze(-1).unsqueeze(-1), dim=0) / (N_max + 1)
-        
+        summm = G_all.unsqueeze(0) * torch.exp(complex_exponent).unsqueeze(-1)
+        # print('summm shape', summm.shape)
+        G_aa = torch.sum(summm, dim=1) / (N_max + 1)
+        # print('G_aa shape', G_aa.shape)
         transmission_prob = torch.abs(G_aa)**2
-        
+        transmission_prob = transmission_prob.permute(1, 0, 2)
+        # print('transmission prob shape', transmission_prob.shape)
         return transmission_prob  # shape: (vdT_size, energy_size, phi_size, num_sites)
     
     ## The following two functions "real_trans_prob_avg_dis" and "trans_prob_avg_disorder_realisation" only deal with the fully disordered case
-    def real_trans_prob_avg_dis(self, N_dis, N_times, steps_per_segment, initial_pos, tbc, vdT, rotation_angle=0, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None):
+    def real_trans_prob_avg_dis(self, N_dis, N_times, steps_per_segment, initial_pos, tbc, vdT, delta=None):
         '''The disorder averaged real-time transmission probability of the evolved initial wavepacket at given initial_position (input)
         over N_times period averaging over N_dis realisation'''
         '''The first initial_position is 1 instead of 0'''
@@ -4248,8 +4416,7 @@ class tb_floquet_tbc_cuda(nn.Module):
             self.H_disorder_cached = None
             print(N)
             
-            real_amp = self.real_time_trans(N_times, steps_per_segment, initial_pos, tbc, vdT, rotation_angle, 
-                                            theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=True)
+            real_amp = self.real_time_trans(N_times, steps_per_segment, initial_pos, tbc, vdT,  delta=delta, fully_disorder=True)
             
             avg += torch.abs(real_amp)**2
             
@@ -4263,7 +4430,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         return avg_tp   # shape: a 3D tensor with dimensions (vdT_size, energy_size, total number of sites)
     
-    def trans_prob_avg_disorder_realisation(self, N_dis, N_max, steps_per_segment, initial_position, energy, tbc, vdT, rotation_angle=0, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None):
+    def trans_prob_avg_disorder_realisation(self, N_dis, N_max, steps_per_segment, initial_position, energy, tbc, vdT, delta=None):
         """The disorder averaged transmission probability of the evolved initial wavepacket at given initial_position (input) over N_max period averaging over N_dis realisation"""
         '''The first initial_position is 1 instead of 0'''
         '''The output should be a tensor with dimensions (vdT_size, energy_size, total numbers of sites)'''
@@ -4290,9 +4457,7 @@ class tb_floquet_tbc_cuda(nn.Module):
             self.H_disorder_cached = None  # Clear the cached disorder Hamiltonian
             print(N)
             
-            trans_prob_single = self.transmission_prob(N_max, steps_per_segment, initial_position, energy, tbc, vdT, 
-                                                    rotation_angle, theta_x, theta_y, a, b, phi1, phi2, 
-                                                    delta, fully_disorder=True)
+            trans_prob_single = self.transmission_prob(N_max, steps_per_segment, initial_position, energy, tbc, vdT, delta=delta, fully_disorder=True)
             # Explicitly squeeze out the singleton dimension
             # trans_prob_single = trans_prob_single.squeeze(2)
             
@@ -4344,27 +4509,48 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         vdT_size, energy_size = vdT.shape[0], energy.shape[0]
         num_sites = self.nx * self.ny
-
+        avg = torch.zeros((vdT_size, energy_size, num_sites), device=self.device)
         # Generate all phi1 and phi2 values at once
         phi1_vals = torch.from_numpy(np.random.uniform(0, 2*np.pi, N_phi)).to(self.device)
         phi2_vals = torch.from_numpy(np.random.uniform(0, 2*np.pi, N_phi)).to(self.device)
 
-        # Expand dimensions for broadcasting
-        vdT = vdT.view(vdT_size, 1, 1, 1)
-        energy = energy.view(1, energy_size, 1, 1)
-        phi1_vals = phi1_vals.view(1, 1, N_phi, 1)
-        phi2_vals = phi2_vals.view(1, 1, N_phi, 1)
-
-        # Compute transmission probabilities for all combinations in one go
-        trans_prob_all = self.transmission_prob(N_max, steps_per_segment, initial_pos, energy, tbc, vdT, rotation_angle, 
-                                                theta_x, theta_y, a, b, phi1=phi1_vals, phi2=phi2_vals, 
-                                                delta=delta, fully_disorder=False)
-
-        # Average over the phi dimension
-        avg_tp = torch.mean(trans_prob_all, dim=2)
-
+        # Compute transmission probabilities
+        for N in range(N_phi):
+            print(N)
+            trans_prob = self.transmission_prob(N_max, steps_per_segment, initial_pos, energy, tbc, vdT, rotation_angle, 
+                                                    theta_x, theta_y, a, b, phi1=phi1_vals[N], phi2=phi2_vals[N], 
+                                                    delta=delta, fully_disorder=False)
+            avg += trans_prob
+            del trans_prob
+            torch.cuda.empty_cache()
+            
+        avg_tp = avg/ N_phi
+        del avg
+        torch.cuda.empty_cache()
+        
         return avg_tp
     
+    def plot_transmission_probability(self, transmission_prob, figsize, save_path=None):
+        """Plot the transmission probability of the intial wavepacket at given initial position (input)"""
+        '''The input should be a vector with dimension equal to the total number of sites'''
+        fig, ax = plt.subplots(figsize=figsize)
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        trans_prob_cpu = transmission_prob.cpu().numpy().reshape(self.ny, self.nx)
+        norm = plt.Normalize(np.min(trans_prob_cpu), np.max(trans_prob_cpu))
+        cmap = plt.get_cmap('viridis')
+        plt.imshow(trans_prob_cpu, cmap=cmap, norm=norm, interpolation='nearest', origin='lower')
+        plt.colorbar()
+        plt.xlabel('X', fontsize=label_fontsize)
+        plt.ylabel('Y', fontsize=label_fontsize)
+        ax.tick_params(axis='x', labelsize=tick_label_fontsize)
+        ax.tick_params(axis='y', labelsize=tick_label_fontsize)
+        plt.gca().invert_yaxis()
+        if save_path:
+            plt.tight_layout()
+            fig.savefig(save_path, format='pdf', bbox_inches='tight')
+        return None
+        
     ## Quantised Charge pumping
     def derivative_H_tbc1(self, theta_y, tbc='y'):
         if isinstance(theta_y, (int, float)):
