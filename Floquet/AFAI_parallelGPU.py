@@ -19,6 +19,8 @@ import concurrent.futures
 from scipy.optimize import linear_sum_assignment
 import time
 multiprocessing.set_start_method('spawn', force=True)
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
 
 class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice with Floquet driving and periodic boundary conditions
     def __init__(self, period, lattice_constant, J_coe, num_y, num_x = 2, device=None):
@@ -1893,7 +1895,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         print('phi1 is', phi1_ex, 'phi2 is', phi2_ex)
         potential = torch.cos(2 * np.pi * u + phi1 + phi1_ex) + torch.cos(2 * np.pi * v + phi2 + phi2_ex)
         potential = potential.reshape(self.ny, self.nx).to(torch.cdouble)
-        
+        # print(potential)
         # Use broadcasting to apply the potential to all vd values
         H_aperiodic[:, sites.long(), sites.long()] = potential * -vd / 2
 
@@ -1901,8 +1903,9 @@ class tb_floquet_tbc_cuda(nn.Module):
         if contourplot:
             # Use the first vdT for plotting
             H_ap = H_aperiodic[0].diag().cpu().numpy().reshape(self.ny, self.nx).real
+            # print(H_ap)
             plt.figure(figsize=(8, 6))
-            norm = plt.Normalize(np.min(H_ap), np.max(H_ap))
+            norm = plt.Normalize(-vd, vd)
             # print(np.min(H_ap), np.max(H_ap))
             cmap = plt.get_cmap('viridis')
             plt.imshow(H_ap, cmap=cmap, norm=norm, interpolation='nearest', origin='upper')
@@ -1978,14 +1981,14 @@ class tb_floquet_tbc_cuda(nn.Module):
             mu[i, j] = value
         return mu
         
-    def visualise_quasiperiodic(self, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, grid_density = 100, save_path=None):
+    def visualise_quasiperiodic(self, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, grid_density=100, circle_size=0.1, circle_color='black', colorbar=False, save_path=None):
         """
         Visualize a 2D square lattice with nx x ny sites. Each lattice site is represented by a hollow circle with a dashed outline.
         The contour plot is centered at ((self.nx - 1)/2, (self.ny - 1)/2).
         """
         rotation_angle = rotation_angle.to(self.device) if isinstance(rotation_angle, torch.Tensor) else torch.tensor(rotation_angle, device=self.device)
-        fig, ax = plt.subplots(figsize=(8, 8))
-        
+        fig, ax = plt.subplots(figsize=(8, 6))
+
         # Create a denser grid for the contour plot, centered at ((self.nx - 1)/2, (self.ny - 1)/2)
         x_dense = np.linspace(-1, self.nx, grid_density) - (self.nx - 1) / 2
         y_dense = np.linspace(-1, self.ny, grid_density) - (self.ny - 1) / 2
@@ -1995,35 +1998,50 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         # Plot the contour
         X_contour, Y_contour = np.meshgrid(x_dense + (self.nx - 1) / 2, y_dense + (self.ny - 1) / 2, indexing='ij')
-        ax.contourf(X_contour, Y_contour, mu, levels=15, cmap='viridis')
+        contour_plot = ax.contourf(X_contour, Y_contour, mu, levels=15, cmap='viridis')
+
+        # Create a colorbar with the same height as the main plot
+        if colorbar:
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad=0.1)  # Increased pad value to move the color bar further
+            cbar = fig.colorbar(contour_plot, cax=cax)
+            cbar.ax.tick_params(labelsize=20)  # Set font size for colorbar tick labels
+            cbar.set_label(r'$V_{r}T$', fontsize=25)  # Set the label for the color bar
+
         # Set limits and aspect ratio
         ax.set_xlim(-1, self.nx)
         ax.set_ylim(-1, self.ny)
         ax.set_aspect('equal')
+
         # Set tick positions and labels for x and y axes, excluding -1
         x_ticks = np.arange(0, self.nx, 1)
         y_ticks = np.arange(0, self.ny, 1)
-        
+
         ax.set_xticks(x_ticks)
-        ax.set_xticklabels(x_ticks, fontsize=14)  # Set font size for x-axis tick labels
+        ax.set_xticklabels(x_ticks, fontsize=25)  # Set font size for x-axis tick labels
         ax.set_yticks(y_ticks)
-        ax.set_yticklabels(y_ticks, fontsize=14)  # Set font size for y-axis tick labels
+        ax.set_yticklabels(y_ticks, fontsize=25)  # Set font size for y-axis tick labels
+
+        # Set x and y axis labels
+        ax.set_xlabel('X', fontsize=30)
+        ax.set_ylabel('Y', fontsize=30)
+
         # Generate coordinates for the lattice points using torch
         x_coords, y_coords = torch.meshgrid(torch.arange(self.nx), torch.arange(self.ny), indexing='ij')
-        
+
         # Flatten the coordinates for easier plotting
         x_coords = x_coords.flatten().cpu().numpy()
         y_coords = y_coords.flatten().cpu().numpy()
-        
-        # Plot hollow circles at each lattice point
+
+        # Plot hollow circles at each lattice point with specified color
         for x, y in zip(x_coords, y_coords):
-            circle = plt.Circle((x, y), 0.1, edgecolor='black', facecolor='none', linestyle='--', linewidth=1.5)
+            circle = plt.Circle((x, y), circle_size, edgecolor=circle_color, facecolor='none', linestyle='--', linewidth=1.5)
             ax.add_patch(circle)
-        
-        # Remove axis labels and ticks
+
+        # Remove axis labels and ticks if needed (commented out here)
         # ax.set_xticks([])
         # ax.set_yticks([])
-        
+
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, format='pdf', bbox_inches='tight')
@@ -2062,12 +2080,14 @@ class tb_floquet_tbc_cuda(nn.Module):
             vdT = vdT.to(self.device)
         
         vd = vdT / self.T
+        # print(vd)
         # Reshape vd for broadcasting
         vd = vd.reshape(-1, 1, 1)
         
         if self.H_disorder_cached is None or initialise:
             size = self.nx * self.ny
             random_values = torch.rand(size, device=self.device) * 2 - 1  # Uniform distribution between -1 and 1
+            # print('random_values', random_values)
             self.H_disorder_cached = torch.diag(random_values)
 
         # Use broadcasting to apply vd to the cached disorder matrix
@@ -2078,11 +2098,11 @@ class tb_floquet_tbc_cuda(nn.Module):
             H_dis = disorder_matrix[0].diag().cpu().numpy().reshape(self.ny, self.nx)
             
             plt.figure(figsize=(8, 6))
-            norm = plt.Normalize(np.min(H_dis), np.max(H_dis))
+            norm = plt.Normalize(-vd, vd)
             cmap = plt.get_cmap('viridis')
             plt.imshow(H_dis, cmap=cmap, norm=norm, interpolation='nearest', origin='lower')
             fontsize = 24
-            ticksize = 16
+            ticksize = 20
             cbar = plt.colorbar(aspect=50)
             cbar.set_label(r'$V_{\mathbf{r}}T$', fontsize=fontsize)
             
@@ -2092,18 +2112,16 @@ class tb_floquet_tbc_cuda(nn.Module):
 
             # Multiply the tick labels by self.T
             new_tick_labels = [float(tick.get_text().replace('−', '-')) * self.T for tick in tick_labels]
-
             # Set the new tick labels on the colorbar
             cbar.ax.set_yticks(tick_locations)  # Set tick locations
             cbar.ax.set_yticklabels([f'{label:.3f}' for label in new_tick_labels])  # Set tick labels
-
             cbar.ax.tick_params(labelsize=ticksize)
             plt.xlabel('X', fontsize=fontsize)
             plt.ylabel('Y', fontsize=fontsize)
             
             # Change font size of x and y tick labels
-            x_ticks = np.arange(0, self.nx, 4)
-            y_ticks = np.arange(0, self.ny, 4)
+            x_ticks = np.arange(0, self.nx, 1)
+            y_ticks = np.arange(0, self.ny, 1)
             plt.xticks(x_ticks, fontsize=ticksize)
             plt.yticks(y_ticks, fontsize=ticksize)
             plt.tight_layout()
@@ -3562,7 +3580,6 @@ class tb_floquet_tbc_cuda(nn.Module):
             torch.cuda.empty_cache()
 
             E_T, eigvals, _ = self.quasienergies_states_bulk(steps_per_segment, vdT, theta_x, theta_y, a, b, phi1_ex, phi2_ex, rotation_angle, delta, initialise, fully_disorder)
-            
             # Compute level spacing for each batch element
             difff = torch.diff(E_T, dim=1)
             level_spacing = torch.minimum(difff[:, 1:], difff[:, :-1]) / torch.maximum(difff[:, 1:], difff[:, :-1])
@@ -3756,6 +3773,35 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
     
+    def plot_dos(self, steps_per_segment, tbc, vdT, theta_p_num, rotation_angle = torch.pi/4, a=0, b=0, phi1=0, phi2=0, delta=None, initialise=False, fully_disorder=True, num_bins=50, save_path=None):
+        sorted_eigv_r, _, _ = self.quasienergies_states_edge(steps_per_segment, tbc, vdT, theta_p_num, rotation_angle, a, b, phi1, phi2, delta, initialise, fully_disorder)
+        quasienergies = sorted_eigv_r.cpu().numpy()
+        flat_quasienergies = np.real(quasienergies).flatten()
+        # Calculate the histogram
+        hist, bin_edges = np.histogram(flat_quasienergies, bins=num_bins, range=(-np.pi/self.T, np.pi/self.T))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(8, 10))
+        ax.plot(hist, bin_centers, 'b-')
+        ax.fill_betweenx(bin_centers, 0, hist, alpha=0.3)
+        
+        # Set labels and ticks
+        ax.set_ylabel(r'Quasienergy, $\varepsilon$', fontsize=14)
+        ax.set_xlabel('DOS', fontsize=14)
+        ax.set_ylim(-np.pi/self.T, np.pi/self.T)
+        ax.set_yticks([-np.pi/self.T, -np.pi/(2*self.T), 0, np.pi/(2*self.T), np.pi/self.T])
+        ax.set_yticklabels([r'$-\frac{\pi}{T}$', r'$-\frac{\pi}{2T}$', '0', r'$\frac{\pi}{2T}$', r'$\frac{\pi}{T}$'])
+        
+        # Remove top and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, format='pdf', bbox_inches='tight')
+        plt.show()
+        
     # def H_eff_edge(self, steps_per_segment, vdT, N_theta, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
         
     #     delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_edge(steps_per_segment, 'x', vdT, N_theta, rotation_angle=rotation_angle, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
@@ -3798,7 +3844,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         # print(diagonal)
         return torch.diag(diagonal)
     
-    def compute_deformed_U_edge(self, l1, l2, t, theta_num, steps_per_segment, vdT, rotation_angle=torch.pi/4, epsilonT=torch.pi, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, visualize=False):
+    def compute_deformed_U_edge(self, l1, l2, t, theta_num, steps_per_segment, vdT, rotation_angle=torch.pi/4, epsilonT=torch.pi, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, visualize=False, save_path=None):
         thetax, thetay = self.get_theta_values(theta_num, 'x')
         
         # First the time evolution operator defined on a cylinder
@@ -3826,23 +3872,37 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         if visualize:
             # Visualization function
-            def visualize_matrix(matrix, title):
-                plt.figure(figsize=(10, 10))
-                
+            def visualize_matrix(matrix, save_path=None):
                 if isinstance(matrix, torch.Tensor):
                     matrix = matrix.cpu().detach().numpy()
-                
-                if np.iscomplexobj(matrix):
-                    plt.imshow(np.abs(matrix), cmap='viridis')
-                else:
-                    plt.imshow(matrix, cmap='viridis')
-                
-                plt.colorbar()
-                plt.title(title)
-                plt.show()
 
+                if np.iscomplexobj(matrix):
+                    matrix = np.abs(matrix)
+
+                fig, ax = plt.subplots(figsize=(10, 8))
+                
+                im = ax.imshow(matrix, cmap='Purples', aspect='equal')
+
+                # Adjust font sizes
+                ax.tick_params(axis='both', which='major', labelsize=20)
+
+                # Create a divider for existing axes instance
+                from mpl_toolkits.axes_grid1 import make_axes_locatable
+                divider = make_axes_locatable(ax)
+                
+                # Append axes to the right of the main axes, with 5% width of the main axes
+                cax = divider.append_axes("right", size="5%", pad=0.05)
+
+                # Create colorbar in the appended axes
+                cbar = plt.colorbar(im, cax=cax)
+                cbar.ax.tick_params(labelsize=20)
+                cbar.set_label(r'$|U_{ij}|$', fontsize=26)
+                if save_path:
+                    plt.savefig(save_path, format='pdf', bbox_inches='tight')
+
+                plt.show()
             # Visualize the deformed evolution operator
-            visualize_matrix(U_epsilon[0], f"Deformed Evolution Operator (l1={l1}, l2={l2})")
+            visualize_matrix(U_epsilon[0], save_path)
 
         return U_epsilon
     
