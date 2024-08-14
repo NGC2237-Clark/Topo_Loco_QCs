@@ -3680,7 +3680,7 @@ class tb_floquet_tbc_cuda(nn.Module):
     ## Exploring the edge properties of the system
     ## Function 1. Quasienergies and states -- COMPLETED
     ## Function 2. Deformed time-periodic evolution operator --COMPLETED
-    ## Function 3. Edge state invariant
+    ## Function 3. Edge state invariant --COMPLETED
     ## Function 4. Disordered-averaged transmission probability --COMPLETED
     ## Function 5. Quantised Charge Pumping --COMPLETED
     ## Function 6. The Inverse Participation Ratios
@@ -4338,7 +4338,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Compute G_aa
         summm = G_all.unsqueeze(0) * torch.exp(complex_exponent).unsqueeze(-1)
         # print('summm shape', summm.shape)
-        G_aa = torch.sum(summm, dim=1) / (N_max + 1)
+        G_aa = torch.sum(summm, dim=1) / (N_max)
         # print('G_aa shape', G_aa.shape)
         transmission_prob = torch.abs(G_aa)**2
         transmission_prob = transmission_prob.permute(1, 0, 2)
