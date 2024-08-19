@@ -20,6 +20,8 @@ from scipy.optimize import linear_sum_assignment
 import time
 multiprocessing.set_start_method('spawn', force=True)
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.colors import LightSource
+from matplotlib.colors import LinearSegmentedColormap
 
 
 class tb_floquet_pbc_cuda(nn.Module): # Tight-binding model of square lattice with Floquet driving and periodic boundary conditions
@@ -2102,7 +2104,7 @@ class tb_floquet_tbc_cuda(nn.Module):
             cmap = plt.get_cmap('viridis')
             plt.imshow(H_dis, cmap=cmap, norm=norm, interpolation='nearest', origin='lower')
             fontsize = 24
-            ticksize = 20
+            ticksize = 16
             cbar = plt.colorbar(aspect=50)
             cbar.set_label(r'$V_{\mathbf{r}}T$', fontsize=fontsize)
             
@@ -3680,7 +3682,7 @@ class tb_floquet_tbc_cuda(nn.Module):
     ## Exploring the edge properties of the system
     ## Function 1. Quasienergies and states -- COMPLETED
     ## Function 2. Deformed time-periodic evolution operator --COMPLETED
-    ## Function 3. Edge state invariant --COMPLETED
+    ## Function 3. Edge state invariant
     ## Function 4. Disordered-averaged transmission probability --COMPLETED
     ## Function 5. Quantised Charge Pumping --COMPLETED
     ## Function 6. The Inverse Participation Ratios
@@ -3801,7 +3803,84 @@ class tb_floquet_tbc_cuda(nn.Module):
         if save_path:
             plt.savefig(save_path, format='pdf', bbox_inches='tight')
         plt.show()
+    
+    def eigenstate_prob_density(self, wave_f, figsize, quasi=False, scale_factor=20, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, grid_density=100, fix_z_scale=True, save_path=None):
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
         
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        
+        # Calculate probability density
+        prob_density = (wave_f.abs() ** 2).cpu().numpy().reshape(self.ny, self.nx)
+        scaled_prob_d = prob_density * scale_factor
+        x = np.arange(self.nx)
+        y = np.arange(self.ny)
+        X, Y = np.meshgrid(x, y)
+        
+        ls = LightSource(azdeg=315, altdeg=45)
+        
+        # Use the custom colormap
+        cmap = LinearSegmentedColormap.from_list('white_purple', ['white', 'purple'], N=100)
+        
+        surf = ax.plot_surface(X, Y, scaled_prob_d, 
+                            cmap=cmap,
+                            rstride=1, cstride=1,
+                            linewidth=0,
+                            antialiased=False,
+                            shade=True, lightsource=ls)
+        
+        if quasi:
+            # Generate quasiperiodic potential
+            rotation_angle = rotation_angle.to(self.device) if isinstance(rotation_angle, torch.Tensor) else torch.tensor(rotation_angle, device=self.device)
+            x_dense = np.linspace(-1, self.nx, grid_density) - (self.nx - 1) / 2
+            y_dense = np.linspace(-1, self.ny, grid_density) - (self.ny - 1) / 2
+            X_dense, Y_dense = np.meshgrid(x_dense + (self.nx - 1) / 2, y_dense + (self.ny - 1) / 2, indexing='ij')
+            Z = self.quasip_continuum(x_dense, y_dense, a, b, phi1_ex, phi2_ex, rotation_angle)
+
+            # Add quasiperiodic contour plot at the bottom
+            offset = -np.max(scaled_prob_d) * 1.1  # Set the offset to 10% below the minimum of the probability density
+            quasi_contour = ax.contourf(X_dense, Y_dense, Z, levels=100, zdir='z', offset=offset, cmap='viridis', alpha=0.7)
+            
+            # Add colorbar for quasiperiodic potential
+            cbar_quasi = fig.colorbar(quasi_contour, ax=ax, shrink=0.5, aspect=5, pad=0.15)
+            cbar_quasi.set_label('Quasiperiodic Potential', fontsize=label_fontsize, labelpad=20)
+            cbar_quasi.ax.tick_params(labelsize=tick_label_fontsize)
+
+        if fix_z_scale:
+            if quasi:
+                ax.set_zlim((offset, np.max(scaled_prob_d)))
+            else:
+                ax.set_zlim((0, np.max(scaled_prob_d)))
+        
+        ax.set_xlabel('X', labelpad=100, fontsize=label_fontsize)
+        ax.set_ylabel('Y', labelpad=100, fontsize=label_fontsize)
+        
+        # Set 5 equally spaced tick labels for x and y axes
+        x_ticks = np.linspace(0, self.nx-1, 5, dtype=int)
+        y_ticks = np.linspace(0, self.ny-1, 5, dtype=int)
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+        
+        ax.tick_params(axis='both', which='major', labelsize=tick_label_fontsize)
+        
+        # Remove z-axis tick labels
+        ax.set_zticklabels([])
+        
+        ax.set_box_aspect((self.nx, self.ny, np.max(scaled_prob_d)))
+        ax.view_init(elev=40, azim=45)
+        
+        cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+        cbar.set_label(r'Probability Density, $|\psi_i(\mathbf{r})|^2$ (arb. units)', fontsize=label_fontsize, labelpad=20)
+        cbar.ax.tick_params(labelsize=0)
+        
+        if save_path:
+            fig.savefig(save_path, format='pdf', bbox_inches='tight')
+        
+        plt.show()
+        
+        return None
+    
     # def H_eff_edge(self, steps_per_segment, vdT, N_theta, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
         
     #     delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_edge(steps_per_segment, 'x', vdT, N_theta, rotation_angle=rotation_angle, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
@@ -3855,7 +3934,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         del log_eigenvalues, S
         # Create the deformation operator F
         F_operator = self.deform_F_op(s=1, l1=l1, l2=l2).to(torch.complex128)
-        
+        # F_operator = F_operator @ F_operator
         # Compute the deformed effective Hamiltonian
         H_eff_deformed = F_operator @ H_eff @ F_operator
         
@@ -3966,89 +4045,113 @@ class tb_floquet_tbc_cuda(nn.Module):
         
     #     return U_1_epsilon, U_2_epsilon
     
-    def separate_edge_operators(self, U_epsilon, l2, initial_threshold=1e-10, increment=1e-6):
+    # def separate_edge_operators(self, U_epsilon, l2, initial_threshold=1e-10, increment=1e-6):
+    #     """
+    #     Separate U_1,ε and U_2,ε from the full U_epsilon matrix by identifying the identity block in the middle.
+        
+    #     Parameters:
+    #     U_epsilon (torch.Tensor): The full deformed evolution operator (complex128).
+    #     l2 (int): Index offset for identity block determination.
+    #     initial_threshold (float): Initial threshold to determine closeness to 1 for diagonal elements.
+    #     increment (float): Increment to increase the threshold in case of failure.
+        
+    #     Returns:
+    #     tuple: (U_1_epsilon, U_2_epsilon)
+    #     """
+    #     N = U_epsilon.shape[-1]
+
+    #     def is_identity(x, threshold):
+    #         return torch.isclose(torch.abs(x), torch.tensor(1.0, dtype=torch.float64), atol=threshold)
+
+    #     threshold = initial_threshold
+    #     while True:
+    #         # Initialize identity_start and identity_end based on l2 and self.nx
+    #         identity_start = l2 * self.nx
+    #         # identity_start = 0 
+    #         identity_end = N - 1 - self.nx * l2
+    #         # identity_end = N - 1
+    #         # Find the start of the identity block
+    #         while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start], threshold):
+    #             identity_start += 1
+
+    #         # Find the end of the identity block
+    #         while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end], threshold):
+    #             identity_end -= 1
+
+    #         print(f"Threshold: {threshold}")
+    #         print(f"N: {N}")
+    #         print(f"identity_start: {identity_start}")
+    #         print(f"identity_end: {identity_end}")
+
+    #         if identity_end >= identity_start:
+    #             break  # Exit the loop if the condition is satisfied
+
+    #         # Increase the threshold
+    #         threshold += increment
+
+    #     if identity_end < identity_start:
+    #         print("Failed to separate edge operators within the maximum number of attempts.")
+    #         print("Diagonal elements of U_epsilon:")
+    #         print(torch.diag(U_epsilon[0]))
+    #         return None, None  # or handle this case appropriately
+
+    #     # Calculate the sizes of U_1 and U_2
+    #     u1_size = identity_start
+    #     u2_size = N - (identity_end + 1)
+
+    #     # Balance the sizes
+    #     edge_size = max(u1_size, u2_size)
+
+    #     # Extract U_1,ε and U_2,ε with balanced sizes
+    #     U_1_epsilon = U_epsilon[:, :edge_size, :edge_size]
+    #     U_2_epsilon = U_epsilon[:, -edge_size:, -edge_size:]
+
+    #     print(f"Shape of U_1_epsilon: {U_1_epsilon.shape}")
+    #     print(f"Shape of U_2_epsilon: {U_2_epsilon.shape}")
+
+    #     # Check off-diagonal elements in the supposed identity block
+    #     if identity_end >= identity_start:
+    #         identity_block = U_epsilon[0, identity_start:identity_end+1, identity_start:identity_end+1]
+    #         off_diag_max = torch.max(torch.abs(identity_block - torch.eye(identity_block.shape[0], dtype=U_epsilon.dtype, device=U_epsilon.device)))
+    #         print(f"Max off-diagonal element in identity block: {off_diag_max}")
+            
+    #         # Detailed inspection of off-diagonal elements
+    #         off_diag_elements = torch.abs(identity_block - torch.eye(identity_block.shape[0], dtype=U_epsilon.dtype, device=U_epsilon.device))
+    #         print("Off-diagonal elements:")
+    #         print(off_diag_elements)
+    #     else:
+    #         print("Cannot check off-diagonal elements: invalid identity block")
+
+    #     return U_1_epsilon, U_2_epsilon
+    
+    def separate_edge_operators(self, U_epsilon):
         """
-        Separate U_1,ε and U_2,ε from the full U_epsilon matrix by identifying the identity block in the middle.
+        Split a batch of matrices into upper and lower diagonal blocks.
         
         Parameters:
-        U_epsilon (torch.Tensor): The full deformed evolution operator (complex128).
-        l2 (int): Index offset for identity block determination.
-        initial_threshold (float): Initial threshold to determine closeness to 1 for diagonal elements.
-        increment (float): Increment to increase the threshold in case of failure.
+        U_epsilon (torch.Tensor): Batch of matrices to split. Shape: (batch_size, N, N)
         
         Returns:
         tuple: (U_1_epsilon, U_2_epsilon)
         """
-        N = U_epsilon.shape[-1]
-
-        def is_identity(x, threshold):
-            return torch.isclose(torch.abs(x), torch.tensor(1.0, dtype=torch.float64), atol=threshold)
-
-        threshold = initial_threshold
-        while True:
-            # Initialize identity_start and identity_end based on l2 and self.nx
-            identity_start = l2 * self.nx
-            # identity_start = 0 
-            identity_end = N - 1 - self.nx * l2
-            # identity_end = N - 1
-            # Find the start of the identity block
-            while identity_start < N and not is_identity(U_epsilon[0, identity_start, identity_start], threshold):
-                identity_start += 1
-
-            # Find the end of the identity block
-            while identity_end >= 0 and not is_identity(U_epsilon[0, identity_end, identity_end], threshold):
-                identity_end -= 1
-
-            print(f"Threshold: {threshold}")
-            print(f"N: {N}")
-            print(f"identity_start: {identity_start}")
-            print(f"identity_end: {identity_end}")
-
-            if identity_end >= identity_start:
-                break  # Exit the loop if the condition is satisfied
-
-            # Increase the threshold
-            threshold += increment
-
-        if identity_end < identity_start:
-            print("Failed to separate edge operators within the maximum number of attempts.")
-            print("Diagonal elements of U_epsilon:")
-            print(torch.diag(U_epsilon[0]))
-            return None, None  # or handle this case appropriately
-
-        # Calculate the sizes of U_1 and U_2
-        u1_size = identity_start
-        u2_size = N - (identity_end + 1)
-
-        # Balance the sizes
-        edge_size = max(u1_size, u2_size)
-
-        # Extract U_1,ε and U_2,ε with balanced sizes
-        U_1_epsilon = U_epsilon[:, :edge_size, :edge_size]
-        U_2_epsilon = U_epsilon[:, -edge_size:, -edge_size:]
-
+        batch_size, N, _ = U_epsilon.shape
+        
+        # Calculate the midpoint
+        mid = N // 2
+        
+        # Split the matrices
+        U_1_epsilon = U_epsilon[:, :mid, :mid]
+        U_2_epsilon = U_epsilon[:, mid:, mid:]
+        
         print(f"Shape of U_1_epsilon: {U_1_epsilon.shape}")
         print(f"Shape of U_2_epsilon: {U_2_epsilon.shape}")
-
-        # Check off-diagonal elements in the supposed identity block
-        if identity_end >= identity_start:
-            identity_block = U_epsilon[0, identity_start:identity_end+1, identity_start:identity_end+1]
-            off_diag_max = torch.max(torch.abs(identity_block - torch.eye(identity_block.shape[0], dtype=U_epsilon.dtype, device=U_epsilon.device)))
-            print(f"Max off-diagonal element in identity block: {off_diag_max}")
-            
-            # Detailed inspection of off-diagonal elements
-            off_diag_elements = torch.abs(identity_block - torch.eye(identity_block.shape[0], dtype=U_epsilon.dtype, device=U_epsilon.device))
-            print("Off-diagonal elements:")
-            print(off_diag_elements)
-        else:
-            print("Cannot check off-diagonal elements: invalid identity block")
-
+        
         return U_1_epsilon, U_2_epsilon
     
     def calculate_edge_winding_number(self, l1, l2, t, theta_num, steps_per_segment, vdT, 
                                   rotation_angle=torch.pi/4, epsilonT=torch.pi, 
                                   a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, 
-                                  initialise=False, fully_disorder=True, visualize=False, tolerance= 1e-10):
+                                  initialise=False, fully_disorder=True, visualize=False):
         """
         Calculate the edge winding numbers for U1 or U2 in the AFAI model.
         Returns:
@@ -4060,7 +4163,7 @@ class tb_floquet_tbc_cuda(nn.Module):
                                                 delta, initialise, fully_disorder, visualize)
         
         # Separate U1 and U2
-        U1, U2 = self.separate_edge_operators(U_epsilon, l2, initial_threshold=tolerance)
+        U1, U2 = self.separate_edge_operators(U_epsilon)
 
         def compute_winding_number(U_edge):
             # Compute step size
@@ -4087,7 +4190,7 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         return n_edge_1, n_edge_2
     
-    def convergence_edge_invariant(self, l1, l2, t, grid_num_range, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, tolerance=1e-10, save_path=None):
+    def convergence_edge_invariant(self, l1, l2, t, grid_num_range, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, save_path=None):
         """
         Convergence test for the edge invariant with respect to the grid resolution in θ (theta_num).
         
@@ -4115,8 +4218,7 @@ class tb_floquet_tbc_cuda(nn.Module):
                     rotation_angle=rotation_angle, epsilonT=xi,
                     a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex,
                     delta=delta, initialise=initialise, fully_disorder=fully_disorder,
-                    visualize=False, tolerance=tolerance
-                )
+                    visualize=False)
                 n_edge_1 = torch.tensor(n_edge_1, device=self.device)
                 n_edge_2 = torch.tensor(n_edge_2, device=self.device)
                 
@@ -4151,7 +4253,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         plt.show()
         return edge_invariant_values
     
-    def plot_edge_invariant_vs_vdT(self, l1, l2, t, theta_num, steps_per_segment, vdT_range, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, tolerance=1e-10):
+    def plot_edge_invariant_vs_vdT(self, l1, l2, t, theta_num, steps_per_segment, vdT_range, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
         """
         Generate a plot of edge invariant versus the aperiodic strength, vdT,
         for two branch cut values ξ=0 and π.
@@ -4166,8 +4268,7 @@ class tb_floquet_tbc_cuda(nn.Module):
                     rotation_angle=rotation_angle, epsilonT=xi,
                     a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex,
                     delta=delta, initialise=initialise, fully_disorder=fully_disorder,
-                    visualize=False, tolerance=tolerance
-                )
+                    visualize=False)
                 n_edge_1 = torch.tensor(n_edge_1, device=self.device)
                 n_edge_2 = torch.tensor(n_edge_2, device=self.device)
 
@@ -4338,7 +4439,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Compute G_aa
         summm = G_all.unsqueeze(0) * torch.exp(complex_exponent).unsqueeze(-1)
         # print('summm shape', summm.shape)
-        G_aa = torch.sum(summm, dim=1) / (N_max)
+        G_aa = torch.sum(summm, dim=1) / (N_max + 1)
         # print('G_aa shape', G_aa.shape)
         transmission_prob = torch.abs(G_aa)**2
         transmission_prob = transmission_prob.permute(1, 0, 2)
@@ -4466,7 +4567,7 @@ class tb_floquet_tbc_cuda(nn.Module):
 
         # Compute transmission probabilities
         for N in range(N_phi):
-            print(N)
+            print('number of phase realisation', N)
             trans_prob = self.transmission_prob(N_max, steps_per_segment, initial_pos, energy, tbc, vdT, rotation_angle, 
                                                     theta_x, theta_y, a, b, phi1=phi1_vals[N], phi2=phi2_vals[N], 
                                                     delta=delta, fully_disorder=False)
@@ -4500,7 +4601,85 @@ class tb_floquet_tbc_cuda(nn.Module):
             plt.tight_layout()
             fig.savefig(save_path, format='pdf', bbox_inches='tight')
         return None
+
+    def plot_transmission_probability1(self, transmission_prob, figsize, quasi=False, scale_factor=5e4, rotation_angle=torch.tensor(np.pi/4), a=0, b=0, phi1_ex=0, phi2_ex=0, grid_density=100, fix_z_scale=True, save_path=None):
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
         
+        tick_label_fontsize = 32
+        label_fontsize = 34
+        
+        trans_prob_cpu = transmission_prob.cpu().numpy().reshape(self.ny, self.nx)
+        scaled_trans_prob = trans_prob_cpu * scale_factor
+
+        x = np.arange(self.nx)
+        y = np.arange(self.ny)
+        X, Y = np.meshgrid(x, y)
+        
+        ls = LightSource(azdeg=315, altdeg=45)
+        
+        # Use the custom colormap
+        cmap = LinearSegmentedColormap.from_list('white_purple', ['white', 'purple'], N=100)
+        
+        surf = ax.plot_surface(X, Y, scaled_trans_prob, 
+                            cmap=cmap,
+                            rstride=1, cstride=1,
+                            linewidth=0,
+                            antialiased=False,
+                            shade=True, lightsource=ls)
+        
+        if quasi:
+            # Generate quasiperiodic potential
+            rotation_angle = rotation_angle.to(self.device) if isinstance(rotation_angle, torch.Tensor) else torch.tensor(rotation_angle, device=self.device)
+            x_dense = np.linspace(-1, self.nx, grid_density) - (self.nx - 1) / 2
+            y_dense = np.linspace(-1, self.ny, grid_density) - (self.ny - 1) / 2
+            X_dense, Y_dense = np.meshgrid(x_dense + (self.nx - 1) / 2, y_dense + (self.ny - 1) / 2, indexing='ij')
+            Z = self.quasip_continuum(x_dense, y_dense, a, b, phi1_ex, phi2_ex, rotation_angle)
+
+            # Add quasiperiodic contour plot at the bottom
+            offset = -np.max(scaled_trans_prob) * 1.1  # Set the offset to 10% below the minimum of the transmission probability
+            quasi_contour = ax.contourf(X_dense, Y_dense, Z, levels=100, zdir='z', offset=offset, cmap='viridis', alpha=0.7)
+            
+            # Add colorbar for quasiperiodic potential
+            cbar_quasi = fig.colorbar(quasi_contour, ax=ax, shrink=0.5, aspect=5, pad=0.15)
+            cbar_quasi.set_label('Quasiperiodic Potential', fontsize=label_fontsize, labelpad=20)
+            cbar_quasi.ax.tick_params(labelsize=tick_label_fontsize)
+
+        if fix_z_scale:
+            if quasi:
+                ax.set_zlim((offset, np.max(scaled_trans_prob)))
+            else:
+                ax.set_zlim((0, np.max(scaled_trans_prob)))
+        
+        ax.set_xlabel('X', labelpad=100, fontsize=label_fontsize)
+        ax.set_ylabel('Y', labelpad=100, fontsize=label_fontsize)
+        
+        # Set 5 equally spaced tick labels for x and y axes
+        x_ticks = np.linspace(0, self.nx-1, 5, dtype=int)
+        y_ticks = np.linspace(0, self.ny-1, 5, dtype=int)
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+        
+        ax.tick_params(axis='both', which='major', labelsize=tick_label_fontsize)
+        
+        # Remove z-axis tick labels
+        ax.set_zticklabels([])
+        
+        ax.set_box_aspect((self.nx, self.ny, np.max(scaled_trans_prob)))
+        ax.view_init(elev=30, azim=45)
+        
+        cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+        cbar.set_label(r'$\langle |G_N(r,r_0,\epsilon)|^2 \rangle$ (arb. units)', 
+               fontsize=label_fontsize, labelpad=20)
+        cbar.ax.tick_params(labelsize=0)
+        
+        if save_path:
+            fig.savefig(save_path, format='pdf', bbox_inches='tight')
+        
+        plt.show()
+        
+        return None
+    
     ## Quantised Charge pumping
     def derivative_H_tbc1(self, theta_y, tbc='y'):
         if isinstance(theta_y, (int, float)):
