@@ -4393,7 +4393,7 @@ class tb_floquet_tbc_cuda(nn.Module):
             vdT = torch.tensor(vdT, device=self.device)
         elif isinstance(vdT, torch.Tensor):
             vdT = vdT.to(self.device)
-        
+
         # Ensure energy is a tensor
         if isinstance(energy, (int, float)):
             energy = torch.tensor([energy], device=self.device)
@@ -4401,50 +4401,114 @@ class tb_floquet_tbc_cuda(nn.Module):
             energy = torch.tensor(energy, device=self.device)
         elif isinstance(energy, torch.Tensor):
             energy = energy.to(self.device)
-        
+
+        # Multiply energy by 2π/T
+        energy = energy * (2 * torch.pi / self.T)
+
         vdT_size = vdT.shape[0]
         num_sites = self.nx * self.ny
-        
+
         # Reshape vdT, energy for broadcasting
         vdT = vdT.view(vdT_size, 1)
-        
+
         # Compute U for one period
-        # U_one_period = self.time_evol_op(1, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
         U_one_period = self.time_evolution_operator1(self.T, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
-        # print('U_one_period shape', U_one_period.shape)
+
         # Compute powers of U_one_period for all required periods
         U_powers = [torch.eye(num_sites, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(vdT_size, -1, -1)]
         for _ in range(N_max):
             U_powers.append(torch.matmul(U_powers[-1], U_one_period))
-        
         # Stack all U_powers
         U_all_periods = torch.stack(U_powers)
-        # print('U_all_periods shape', U_all_periods.shape)
         # Create initial state vector
         vector = torch.zeros((vdT_size, num_sites), dtype=torch.complex128, device=self.device)
         vector[:, initial_position - 1] = 1.0
-        # print('vector shape', vector.shape)
+
         # Compute G for all periods at once
         G_all = torch.matmul(U_all_periods, vector.unsqueeze(-1)).squeeze(-1)
-        G_all = G_all.view(N_max + 1, vdT_size, num_sites) # Shape [periods, vdT, number_sites]
-        # print('G_all shape',G_all.shape)
+        G_all = G_all.view(N_max + 1, vdT_size, num_sites)  # Shape [periods, vdT, number_sites]
+
         # Compute complex exponentials for all periods at once
-        nn = torch.arange(N_max + 1, device=self.device).view(1, -1, 1) # Shape [energy, Period, vdT, 1, 1]
-        # print('nn shape', nn.shape)
+        nn = torch.arange(N_max + 1, device=self.device).view(1, -1, 1)  # Shape [energy, Period, vdT, 1, 1]
         energy = energy.view(-1, 1, 1)
-        # print('energy shape', energy.shape)
         complex_exponent = 1j * energy * nn * self.T
-        # complex_exponent = 1j * energy * nn.unsqueeze(1) * self.T
-        # print('complex_exponent shape', complex_exponent.shape)
         # Compute G_aa
         summm = G_all.unsqueeze(0) * torch.exp(complex_exponent).unsqueeze(-1)
-        # print('summm shape', summm.shape)
         G_aa = torch.sum(summm, dim=1) / (N_max + 1)
-        # print('G_aa shape', G_aa.shape)
+
         transmission_prob = torch.abs(G_aa)**2
         transmission_prob = transmission_prob.permute(1, 0, 2)
-        # print('transmission prob shape', transmission_prob.shape)
-        return transmission_prob  # shape: (vdT_size, energy_size, phi_size, num_sites)
+
+        return transmission_prob  # shape: (vdT_size, energy_size, num_sites)
+    
+    def transmission_prob_batched(self, N_max, steps_per_segment, initial_position, energy, tbc, vdT, max_batch_size=10, rotation_angle=torch.pi/4, theta_x=0, theta_y=0, a=0, b=0, phi1=0, phi2=0, delta=None, fully_disorder=True):
+        # Ensure vdT is a tensor
+        if isinstance(vdT, (int, float)):
+            vdT = torch.tensor([vdT], device=self.device)
+        elif not isinstance(vdT, torch.Tensor):
+            vdT = torch.tensor(vdT, device=self.device)
+        elif isinstance(vdT, torch.Tensor):
+            vdT = vdT.to(self.device)
+
+        # Ensure energy is a tensor
+        if isinstance(energy, (int, float)):
+            energy = torch.tensor([energy], device=self.device)
+        elif not isinstance(energy, torch.Tensor):
+            energy = torch.tensor(energy, device=self.device)
+        elif isinstance(energy, torch.Tensor):
+            energy = energy.to(self.device)
+
+        # Multiply energy by 2π/T
+        energy = energy * (2 * torch.pi / self.T)
+
+        vdT_size = vdT.shape[0]
+        num_sites = self.nx * self.ny
+
+        # Reshape vdT, energy for broadcasting
+        vdT = vdT.view(vdT_size, 1)
+        energy = energy.view(-1, 1, 1)
+
+        # Compute U for one period
+        U_one_period = self.time_evolution_operator1(self.T, steps_per_segment, tbc, vdT, rotation_angle, theta_x, theta_y, a, b, phi1, phi2, delta, fully_disorder=fully_disorder)
+
+        # Create initial state vector
+        vector = torch.zeros((vdT_size, num_sites), dtype=torch.complex128, device=self.device)
+        vector[:, initial_position - 1] = 1.0
+
+        # Initialize result accumulator
+        G_sum = torch.zeros((energy.shape[0], vdT_size, num_sites), dtype=torch.complex128, device=self.device)
+
+        # Initialize U_power as identity matrix
+        U_power = torch.eye(num_sites, dtype=torch.complex128, device=self.device).unsqueeze(0).expand(vdT_size, -1, -1)
+
+        # Process in batches
+        for start in range(0, N_max + 1, max_batch_size):
+            end = min(start + max_batch_size, N_max + 1)
+            batch_size = end - start
+
+            # Compute powers of U for this batch
+            U_powers = []
+            for _ in range(batch_size):
+                U_powers.append(U_power)
+                U_power = torch.matmul(U_power, U_one_period)
+            U_powers = torch.stack(U_powers)
+            # Compute G for this batch
+            G_batch = torch.matmul(U_powers, vector.unsqueeze(-1)).squeeze(-1)
+            
+            # Compute complex exponentials for this batch
+            nn = torch.arange(start, end, device=self.device).view(1, -1, 1)
+            complex_exponent = 1j * energy * nn * self.T
+            exp = torch.exp(complex_exponent)
+            # Compute and accumulate to G_sum
+            G_sum += torch.sum(G_batch.unsqueeze(0) * exp.unsqueeze(-1), dim=1)
+
+        # Compute final G_aa
+        G_aa = G_sum / (N_max + 1)
+
+        transmission_prob = torch.abs(G_aa)**2
+        transmission_prob = transmission_prob.permute(1, 0, 2)
+
+        return transmission_prob  # shape: (vdT_size, energy_size, num_sites)
     
     ## The following two functions "real_trans_prob_avg_dis" and "trans_prob_avg_disorder_realisation" only deal with the fully disordered case
     def real_trans_prob_avg_dis(self, N_dis, N_times, steps_per_segment, initial_pos, tbc, vdT, delta=None):
@@ -4586,7 +4650,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         '''The input should be a vector with dimension equal to the total number of sites'''
         fig, ax = plt.subplots(figsize=figsize)
         tick_label_fontsize = 32
-        label_fontsize = 34
+        label_fontsize = 40
         trans_prob_cpu = transmission_prob.cpu().numpy().reshape(self.ny, self.nx)
         norm = plt.Normalize(np.min(trans_prob_cpu), np.max(trans_prob_cpu))
         cmap = plt.get_cmap('viridis')
@@ -4651,8 +4715,8 @@ class tb_floquet_tbc_cuda(nn.Module):
             else:
                 ax.set_zlim((0, np.max(scaled_trans_prob)))
         
-        ax.set_xlabel('X', labelpad=100, fontsize=label_fontsize)
-        ax.set_ylabel('Y', labelpad=100, fontsize=label_fontsize)
+        ax.set_xlabel('X', labelpad=200, fontsize=label_fontsize)
+        ax.set_ylabel('Y', labelpad=50, fontsize=label_fontsize)
         
         # Set 5 equally spaced tick labels for x and y axes
         x_ticks = np.linspace(0, self.nx-1, 5, dtype=int)
