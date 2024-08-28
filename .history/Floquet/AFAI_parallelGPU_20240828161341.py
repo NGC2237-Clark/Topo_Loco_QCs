@@ -3760,8 +3760,8 @@ class tb_floquet_tbc_cuda(nn.Module):
             ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
             ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
             # Set y-axis ticks and labels
-            ax.set_yticks([-np.pi, 0, np.pi])
-            ax.set_yticklabels([r'$-\pi$', '0', r'$\pi$'])
+    ax.set_yticks([-np.pi, 0, np.pi])
+    ax.set_yticklabels([r'$-\pi$', '0', r'$\pi$'])
             # Plot for the first vd in the batch
             for i in range(theta_p_num):
                 # print(f"Index i: {i}")

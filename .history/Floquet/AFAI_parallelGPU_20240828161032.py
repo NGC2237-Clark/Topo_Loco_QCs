@@ -3751,17 +3751,15 @@ class tb_floquet_tbc_cuda(nn.Module):
 
             theta_cpu = theta.cpu().numpy()
             if sorted_eigv_r.dim() == 3:
-                eigenvalues_matrix_cpu = (sorted_eigv_r[0] * self.T).cpu().numpy()
+                eigenvalues_matrix_cpu = sorted_eigv_r[0].cpu().numpy()
             elif sorted_eigv_r.dim() == 2:
-                eigenvalues_matrix_cpu = (sorted_eigv_r * self.T).cpu().numpy()
+                eigenvalues_matrix_cpu = sorted_eigv_r.cpu().numpy()
             # print(f"Shape of theta_{tbc}_cpu:", theta_cpu.shape)
             # print(f"Values of theta_{tbc}_cpu:", theta_cpu)
             # print("Shape of eigenvalues_matrix_cpu:", eigenvalues_matrix_cpu.shape)
             ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
             ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
-            # Set y-axis ticks and labels
-            ax.set_yticks([-np.pi, 0, np.pi])
-            ax.set_yticklabels([r'$-\pi$', '0', r'$\pi$'])
+            
             # Plot for the first vd in the batch
             for i in range(theta_p_num):
                 # print(f"Index i: {i}")
@@ -3771,7 +3769,7 @@ class tb_floquet_tbc_cuda(nn.Module):
             ax.set_xlabel(rf'$\theta_{tbc}$', fontsize=label_fontsize)
             ax.set_ylabel(r'Quasienergy, $T\epsilon$', fontsize=label_fontsize)
             ax.set_xlim(0, 2 * np.pi)
-            ax.set_ylim(-np.pi, np.pi)
+            ax.set_ylim(-np.pi / self.T, np.pi / self.T)
 
             if save_path:
                 plt.tight_layout()

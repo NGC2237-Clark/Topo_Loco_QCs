@@ -1623,22 +1623,22 @@ class tb_floquet_tbc_cuda(nn.Module):
         self.J_coe = J_coe / self.T
         self.delta_AB = np.pi / (2 * self.T)
         self.H_disorder_cached = None
+        # Define Pauli matrices
+        self.tau_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
+        self.tau_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
+        self.tau_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
         # Check if device is manually set or based on GPU availability
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
-        
+
         # Move the model to the designated device
         self.to(self.device)
-        
+
         # Check if multiple GPUs are available and wrap the model with DataParallel
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             self = nn.DataParallel(self)
-        # Define Pauli matrices
-        self.tau_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128, device=self.device)
-        self.tau_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128, device=self.device)
-        self.tau_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128, device=self.device)
 
     def lattice_numbering(self):
         '''Numbering the sites in the lattice'''
@@ -3751,17 +3751,15 @@ class tb_floquet_tbc_cuda(nn.Module):
 
             theta_cpu = theta.cpu().numpy()
             if sorted_eigv_r.dim() == 3:
-                eigenvalues_matrix_cpu = (sorted_eigv_r[0] * self.T).cpu().numpy()
+                eigenvalues_matrix_cpu = sorted_eigv_r[0].cpu().numpy()
             elif sorted_eigv_r.dim() == 2:
-                eigenvalues_matrix_cpu = (sorted_eigv_r * self.T).cpu().numpy()
+                eigenvalues_matrix_cpu = sorted_eigv_r.cpu().numpy()
             # print(f"Shape of theta_{tbc}_cpu:", theta_cpu.shape)
             # print(f"Values of theta_{tbc}_cpu:", theta_cpu)
             # print("Shape of eigenvalues_matrix_cpu:", eigenvalues_matrix_cpu.shape)
             ax.set_xticks([0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3, 2*np.pi])
             ax.set_xticklabels(['0', r'$\frac{\pi}{3}$', r'$\frac{2\pi}{3}$', r'$\pi$', r'$\frac{4\pi}{3}$', r'$\frac{5\pi}{3}$', r'$2\pi$'])
-            # Set y-axis ticks and labels
-            ax.set_yticks([-np.pi, 0, np.pi])
-            ax.set_yticklabels([r'$-\pi$', '0', r'$\pi$'])
+            
             # Plot for the first vd in the batch
             for i in range(theta_p_num):
                 # print(f"Index i: {i}")
@@ -3769,9 +3767,9 @@ class tb_floquet_tbc_cuda(nn.Module):
                 ax.scatter([theta_cpu[i]] * size, eigenvalues_matrix_cpu[i].real, c='b', s=0.1)
 
             ax.set_xlabel(rf'$\theta_{tbc}$', fontsize=label_fontsize)
-            ax.set_ylabel(r'Quasienergy, $T\epsilon$', fontsize=label_fontsize)
+            ax.set_ylabel('Quasienergy', fontsize=label_fontsize)
             ax.set_xlim(0, 2 * np.pi)
-            ax.set_ylim(-np.pi, np.pi)
+            ax.set_ylim(-np.pi / self.T, np.pi / self.T)
 
             if save_path:
                 plt.tight_layout()
@@ -3886,25 +3884,26 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         return None
     
-    def H_eff_edge(self, steps_per_segment, vdT, N_theta, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
-        delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_edge(steps_per_segment, 'x', vdT, N_theta, rotation_angle=rotation_angle, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
-        del delete
-        log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
-        log_eigenvalues = (1j / self.T) * log_eigenvalues
+    # def H_eff_edge(self, steps_per_segment, vdT, N_theta, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT=torch.pi, delta=None, initialise=False, fully_disorder=True):
+        
+    #     delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_edge(steps_per_segment, 'x', vdT, N_theta, rotation_angle=rotation_angle, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
+    #     del delete
+    #     log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
+    #     log_eigenvalues = (1j / self.T) * log_eigenvalues
 
-        # Initialize H_eff with the same shape and device as wf_matrix
-        H_eff = torch.zeros_like(wf_matrix, dtype=torch.complex128)
+    #     # Initialize H_eff with the same shape and device as wf_matrix
+    #     H_eff = torch.zeros_like(wf_matrix, dtype=torch.complex128)
 
-        # Create diagonal matrices for all theta-points at once
-        H_diag = torch.diag_embed(log_eigenvalues)
+    #     # Create diagonal matrices for all theta-points at once
+    #     H_diag = torch.diag_embed(log_eigenvalues)
 
-        # Ensure wf_matrix is complex
-        wf_matrix = wf_matrix.to(torch.complex128)
+    #     # Ensure wf_matrix is complex
+    #     wf_matrix = wf_matrix.to(torch.complex128)
 
-        # Compute H_eff for all theta-points in one batch operation
-        H_eff = torch.bmm(torch.bmm(wf_matrix, H_diag), wf_matrix.conj().transpose(-2, -1))
+    #     # Compute H_eff for all theta-points in one batch operation
+    #     H_eff = torch.bmm(torch.bmm(wf_matrix, H_diag), wf_matrix.conj().transpose(-2, -1))
 
-        return H_eff, log_eigenvalues, wf_matrix
+    #     return H_eff, log_eigenvalues, wf_matrix
     
     def deform_F_op(self, s, l1, l2):
         '''All y and l1 and l2 are counted from 1 instead of 0'''
@@ -5274,7 +5273,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         torch.Tensor: Position operator matrix.
         """
         size = self.nx * self.ny
-        X = torch.zeros((size, size), device=self.device)
+        X = torch.zeros((size, size))
         for i in range(size):
             X[i, i] = i % self.nx
         return X
@@ -5287,113 +5286,12 @@ class tb_floquet_tbc_cuda(nn.Module):
         torch.Tensor: Position operator matrix.
         """
         size = self.nx * self.ny
-        Y = torch.zeros((size, size), device=self.device)
+        Y = torch.zeros((size, size))
         for i in range(size):
             Y[i, i] = i // self.nx
         return Y
     
-    def quasienergies_states_open(self, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, delta=None, initialise=False, fully_disorder=True):
-        """The quasi-energy spectrum for the U with open boundary conditions properties"""
-        U = self.time_evolution_operator1(self.T, steps_per_segment, 'open', vdT, rotation_angle, 0, 0, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
-        eigvals, eigvecs = torch.linalg.eig(U)
-        del U
-        torch.cuda.empty_cache()
-        E_T = torch.log(eigvals).imag / self.T
-        
-        # Get the sorting indices for each batch element
-        sorted_indices = torch.argsort(E_T, dim=-1)
-        
-        # Reorder the quasienergy, and the eigenvectors
-        sorted_eigv_r = torch.gather(E_T, -1, sorted_indices)
-        sorted_eigvals = torch.gather(eigvals, -1, sorted_indices)
-        expanded_indices = sorted_indices.unsqueeze(-2).expand_as(eigvecs)
-        sorted_eigvecs = torch.gather(eigvecs, -1, expanded_indices)
-        
-        # Free up memory
-        del eigvals, eigvecs, sorted_indices, expanded_indices
-        torch.cuda.empty_cache()
-        return sorted_eigv_r, sorted_eigvals, sorted_eigvecs
-    
-    def H_eff_open(self, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT = torch.pi, delta=None, initialise=False, fully_disorder=True):
-        delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_open(steps_per_segment, vdT, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
-        del delete
-        log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
-        # Compute H_eff
-        H_eff = -1j * torch.diag(log_eigenvalues)
-        # Transform H_eff back to the original basis
-        H_eff = torch.matmul(torch.matmul(wf_matrix, H_eff), wf_matrix.conj().T)
-        del eigenvalues_matrix, wf_matrix, log_eigenvalues
-        torch.cuda.empty_cache()
-        return H_eff
-        
-    def spectral_localizer(self, epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
-        """
-        Compute the spectral localizer for the system.
-        the H_eff operator is for the open boundary conditions in both x and y direction"""
+    def spectral_localizer(self, epsilon, kappa, x, y, steps_per_segment, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
         X = self.X_operator()
         Y = self.Y_operator()
-        H = self.H_eff_open(steps_per_segment=steps_per_segment, vdT=vdT, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, epsilonT = epsilonT, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
-        I = torch.eye(self.nx*self.ny, dtype=torch.complex128, device=self.device)
-        # print(f"Device of X: {X.device}")
-        # print(f"Device of Y: {Y.device}")
-        # print(f"Device of H: {H.device}")
-        # print(f"Device of I: {I.device}")
-        self.tau_x = self.tau_x.to(self.device)
-        self.tau_y = self.tau_y.to(self.device)
-        self.tau_z = self.tau_z.to(self.device)
-        # print(f"Device of tau_x: {self.tau_x.device}")
-        # print(f"Device of tau_y: {self.tau_y.device}")
-        # print(f"Device of tau_z: {self.tau_z.device}")
-        L = kappa * torch.kron((X - x*I), self.tau_x)
-        L += kappa * torch.kron((Y - y*I), self.tau_y)
-        L += torch.kron((H - epsilonT*I), self.tau_z)
-        return L
-    
-    def is_hermitian(self, matrix, tolerance=1e-15):
-        """
-        Check if a matrix is Hermitian within a given tolerance.
-        
-        Args:
-        matrix (torch.Tensor): The matrix to check
-        tolerance (float): The tolerance for numerical precision
-        
-        Returns:
-        bool: True if the matrix is Hermitian, False otherwise
-        """
-        difference = matrix - matrix.conj().T
-        return torch.all(torch.abs(difference) < tolerance)
-    
-    def check_spectral_localizer_hermitian(self, epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
-        L = self.spectral_localizer(epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
-        is_herm = self.is_hermitian(L)
-        print(f"Is the spectral localizer Hermitian? {is_herm}")
-        if not is_herm:
-            max_diff = torch.max(torch.abs(L - L.conj().T))
-            print(f"Maximum difference from Hermitian: {max_diff}")
-        return is_herm, L
-    
-    def localiser_gap(self, L):
-        """
-        Compute the localiser gap of the spectral localiser, L.
-        
-        This localiser gap provides info about the existence and localtion of topological boundary states at a give eneriges.
-        """
-        eigenvalues = torch.linalg.eigvalsh(L)
-        min_eigvals = torch.min(torch.abs(eigenvalues), dim=-1).values
-        return min_eigvals
-        
-    def compute_signature(self, L):
-        """
-        Compute the signature of a Hermitian matrix, L.
-        
-        The signature is the difference between the number of positive
-        and negative eigenvalues of the matrix.
-        """
-        eigenvalues = torch.linalg.eigvalsh(L)
-        positive_count = torch.sum(eigenvalues > 0)
-        negative_count = torch.sum(eigenvalues < 0)
-        return int(positive_count - negative_count)
-
-    def compute_invariant(self, epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
-        L = self.spectral_localizer(epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
-        return 0.5 * self.compute_signature(L)
+        H = self.H_eff(steps_per_segment=)
