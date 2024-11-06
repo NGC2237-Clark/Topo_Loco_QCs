@@ -3772,7 +3772,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         L += kappa * torch.kron((Y - y*I), self.tau_y)
         # L += torch.kron((H - epsilonT*I), self.tau_z)
         # L += torch.kron((-H - epsilonT*I), self.tau_z)
-        L += torch.kron((H - epsilonT*I), self.tau_z)
+        L += torch.kron((H + epsilonT*I), self.tau_z)
         return L
     
     def is_hermitian(self, matrix, tolerance=1e-15):
@@ -3829,7 +3829,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         y_end = self.ny + extension
         
         # Initialize an array to store the localizer gaps
-        localizer_gaps = torch.zeros((x_end - x_start , y_end - y_start), device=self.device)
+        localizer_gaps = torch.zeros((x_end - x_start, y_end - y_start), device=self.device)
         
         # Compute the localizer gap for each position, including extended areas
         for x in range(x_start, x_end):
@@ -3847,29 +3847,18 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         if plot:
             plt.figure(figsize=(10, 8))
-            
-            # Define the extent to properly center the plaquettes
-            x_extent = [x_start - 0.5, x_end - 0.5]
-            y_extent = [y_start - 0.5, y_end - 0.5]
-            
             im = plt.imshow(normalized_gaps.cpu().numpy(), cmap='viridis', origin='lower', 
-                            extent=x_extent + y_extent)
+                            extent=[x_start, x_end, y_start, y_end])
             plt.colorbar(im, label='Normalized Localizer Gap')
             plt.title('Normalized Localizer Gap')
             plt.xlabel('X')
             plt.ylabel('Y')
             
-            # Create centered ticks for all plaquettes
-            x_ticks = np.arange(x_start, x_end)
-            y_ticks = np.arange(y_start, y_end)
-            plt.xticks(x_ticks)
-            plt.yticks(y_ticks)
-            
-            # Draw lines to indicate the system boundaries (adjusted by -0.5 to align with plaquette boundaries)
-            plt.axvline(x=-0.5, color='r', linestyle='--')
-            plt.axvline(x=self.nx-0.5, color='r', linestyle='--')
-            plt.axhline(y=-0.5, color='r', linestyle='--')
-            plt.axhline(y=self.ny-0.5, color='r', linestyle='--')
+            # Draw lines to indicate the system boundaries
+            plt.axvline(x=0, color='r', linestyle='--')
+            plt.axvline(x=self.nx, color='r', linestyle='--')
+            plt.axhline(y=0, color='r', linestyle='--')
+            plt.axhline(y=self.ny, color='r', linestyle='--')
             
             if save_path:
                 plt.savefig(save_path)

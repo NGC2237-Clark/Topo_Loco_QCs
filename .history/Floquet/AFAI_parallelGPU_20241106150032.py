@@ -3824,12 +3824,12 @@ class tb_floquet_tbc_cuda(nn.Module):
     def normalised_localiser_gap(self, epsilonT, kappa, steps_per_segment, vdT, extension=3, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
         # Define the extended range
         x_start = -extension
-        x_end = self.nx + extension
+        x_end = self.nx + extension -1
         y_start = -extension
-        y_end = self.ny + extension
+        y_end = self.ny + extension -1
         
         # Initialize an array to store the localizer gaps
-        localizer_gaps = torch.zeros((x_end - x_start , y_end - y_start), device=self.device)
+        localizer_gaps = torch.zeros((x_end - x_start, y_end - y_start), device=self.device)
         
         # Compute the localizer gap for each position, including extended areas
         for x in range(x_start, x_end):

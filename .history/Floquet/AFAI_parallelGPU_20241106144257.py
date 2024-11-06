@@ -3829,7 +3829,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         y_end = self.ny + extension
         
         # Initialize an array to store the localizer gaps
-        localizer_gaps = torch.zeros((x_end - x_start , y_end - y_start), device=self.device)
+        localizer_gaps = torch.zeros((x_end - x_start, y_end - y_start), device=self.device)
         
         # Compute the localizer gap for each position, including extended areas
         for x in range(x_start, x_end):

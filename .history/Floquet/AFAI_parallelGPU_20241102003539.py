@@ -3678,7 +3678,7 @@ class tb_floquet_tbc_cuda(nn.Module):
     ## Topological Invariant for Open boundary conditions-- Spectral localiser
     def X_operator(self):
         """
-        Construct the position operator X for the system, representing the x-coordinate of each site.
+        Construct the position operator Y for the system, representing the y-coordinate of each site.
 
         Returns:
         torch.Tensor: Position operator matrix.
@@ -3691,7 +3691,7 @@ class tb_floquet_tbc_cuda(nn.Module):
     
     def Y_operator(self):
         """
-        Construct the position operator Y for the system, representing the y-coordinate of each site.
+        Construct the position operator X for the system, representing the x-coordinate of each site.
 
         Returns:
         torch.Tensor: Position operator matrix.
@@ -3739,9 +3739,7 @@ class tb_floquet_tbc_cuda(nn.Module):
     def H_eff_open(self, steps_per_segment, vdT, a=0, b=0, phi1_ex=0, phi2_ex=0, rotation_angle=torch.pi/4, epsilonT = torch.pi, delta=None, initialise=False, fully_disorder=True):
         delete, eigenvalues_matrix, wf_matrix = self.quasienergies_states_open(steps_per_segment, vdT, a=a, b=b, phi1_ex=phi1_ex, phi2_ex=phi2_ex, rotation_angle=rotation_angle, delta=delta, initialise=initialise, fully_disorder=fully_disorder)
         del delete
-        # log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
-        log_eigenvalues = torch.log(eigenvalues_matrix)
-
+        log_eigenvalues = self.log_with_branchcut1(eigenvalues_matrix, epsilonT)
         # Compute H_eff
         H_eff = 1j * torch.diag(log_eigenvalues)
         # Transform H_eff back to the original basis
@@ -3770,8 +3768,6 @@ class tb_floquet_tbc_cuda(nn.Module):
         # print(f"Device of tau_z: {self.tau_z.device}")
         L = kappa * torch.kron((X - x*I), self.tau_x)
         L += kappa * torch.kron((Y - y*I), self.tau_y)
-        # L += torch.kron((H - epsilonT*I), self.tau_z)
-        # L += torch.kron((-H - epsilonT*I), self.tau_z)
         L += torch.kron((H - epsilonT*I), self.tau_z)
         return L
     
@@ -3805,7 +3801,6 @@ class tb_floquet_tbc_cuda(nn.Module):
         This localiser gap provides info about the existence and localtion of topological boundary states at a give eneriges.
         """
         eigenvalues = torch.linalg.eigvalsh(L)
-        # eigenvalues = torch.linalg.eigvals(L)
         min_eigvals = torch.min(torch.abs(eigenvalues), dim=-1).values
         return min_eigvals
         
@@ -3821,7 +3816,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         negative_count = torch.sum(eigenvalues < 0)
         return int(positive_count - negative_count)
 
-    def normalised_localiser_gap(self, epsilonT, kappa, steps_per_segment, vdT, extension=3, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
+    def normalised_localiser_gap(self, epsilonT, kappa, steps_per_segment, vdT, extension=3, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
         # Define the extended range
         x_start = -extension
         x_end = self.nx + extension
@@ -3829,7 +3824,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         y_end = self.ny + extension
         
         # Initialize an array to store the localizer gaps
-        localizer_gaps = torch.zeros((x_end - x_start , y_end - y_start), device=self.device)
+        localizer_gaps = torch.zeros((x_end - x_start, y_end - y_start), device=self.device)
         
         # Compute the localizer gap for each position, including extended areas
         for x in range(x_start, x_end):
@@ -3845,35 +3840,6 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Normalize the localizer gaps
         normalized_gaps = localizer_gaps / max_gap
         
-        if plot:
-            plt.figure(figsize=(10, 8))
-            
-            # Define the extent to properly center the plaquettes
-            x_extent = [x_start - 0.5, x_end - 0.5]
-            y_extent = [y_start - 0.5, y_end - 0.5]
-            
-            im = plt.imshow(normalized_gaps.cpu().numpy(), cmap='viridis', origin='lower', 
-                            extent=x_extent + y_extent)
-            plt.colorbar(im, label='Normalized Localizer Gap')
-            plt.title('Normalized Localizer Gap')
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            
-            # Create centered ticks for all plaquettes
-            x_ticks = np.arange(x_start, x_end)
-            y_ticks = np.arange(y_start, y_end)
-            plt.xticks(x_ticks)
-            plt.yticks(y_ticks)
-            
-            # Draw lines to indicate the system boundaries (adjusted by -0.5 to align with plaquette boundaries)
-            plt.axvline(x=-0.5, color='r', linestyle='--')
-            plt.axvline(x=self.nx-0.5, color='r', linestyle='--')
-            plt.axhline(y=-0.5, color='r', linestyle='--')
-            plt.axhline(y=self.ny-0.5, color='r', linestyle='--')
-            
-            if save_path:
-                plt.savefig(save_path)
-            plt.show()
         return normalized_gaps
     
     def compute_invariant(self, epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
