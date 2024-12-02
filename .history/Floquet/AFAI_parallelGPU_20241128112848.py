@@ -3680,10 +3680,9 @@ class tb_floquet_tbc_cuda(nn.Module):
     ### Goal 2: Construct the effective Hamiltonian for the system with open boundary conditions -- completed
     ### Goal 3: Compute the spectral localizer for the system -- completed
     ### Goal 4: Compute the normalised spectral localiser gap for the system to reproduce the plots in the paper -- completed
-    ### Goal 5: Compute the energy-, space-resolved Chern marker for the system -- completed
+    ### Goal 5: Compute the energy-, space-resolved Chern marker for the system 
     ### Goal 6: Full parallelisation of the code for the GPU
     ### Goal 7: Compute the energy-resolved Chern markers for the system by averaging over ? x ? lattice sites
-    ### Goal 8: For the fully disordered case, compute the energy-resolved Chern markers for the system by averaging over many disorder realisations
 
     
     def X_operator(self):
@@ -3822,35 +3821,15 @@ class tb_floquet_tbc_cuda(nn.Module):
         
     def compute_signature(self, L):
         """
-        Compute the signature of Hermitian matrices in batch.
+        Compute the signature of a Hermitian matrix, L.
         
-        Parameters:
-        L (torch.Tensor): Input tensor of Hermitian matrices
-                        Can be either:
-                        - Single matrix: shape (L_size, L_size)
-                        - Batch of matrices: shape (num, num, L_size, L_size)
-        
-        Returns:
-        torch.Tensor or int: Signatures for each matrix in batch or single signature
+        The signature is the difference between the number of positive
+        and negative eigenvalues of the matrix.
         """
-        # Compute eigenvalues (supports both single matrix and batched input)
         eigenvalues = torch.linalg.eigvalsh(L)
-        
-        # Handle single matrix case
-        if L.dim() == 2:
-            positive_count = torch.sum(eigenvalues > 0)
-            negative_count = torch.sum(eigenvalues < 0)
-            return int(positive_count - negative_count)
-        
-        # Handle batch case
-        elif L.dim() == 4:
-            # Compute signatures for all matrices at once, keeping float type
-            signatures = (torch.sum(eigenvalues > 0, dim=-1, dtype=torch.float64) - 
-                        torch.sum(eigenvalues < 0, dim=-1, dtype=torch.float64))
-            return signatures
-        
-        else:
-            raise ValueError(f"Input tensor must be 2D or 4D, got {L.dim()}D")
+        positive_count = torch.sum(eigenvalues > 0)
+        negative_count = torch.sum(eigenvalues < 0)
+        return int(positive_count - negative_count)
 
     def normalised_localiser_gap(self, epsilonT, kappa, steps_per_segment, vdT, extension=3, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
         # Define the extended range
@@ -3911,7 +3890,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         L = self.spectral_localizer(epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
         return 0.5 * self.compute_signature(L)
     
-    def compute_chern_marker(self, epsilonT, kappa, steps_per_segment, vdT, extension=0, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True, plot=False, save_path=None):
+    def compute_chern_marker(self, epsilonT, kappa, steps_per_segment, vdT, extension=0, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
         # Define the extended range
         x_start = -extension
         x_end = self.nx + extension
@@ -3922,152 +3901,3 @@ class tb_floquet_tbc_cuda(nn.Module):
         chern_markers = torch.zeros((x_end - x_start, y_end - y_start), device=self.device)
         
         # Compute the Chern marker for each position, including extended areas
-        for x in range(x_start, x_end):
-            print(f"Computing Chern marker for x = {x}")
-            for y in range(y_start, y_end):
-                print(f"Computing Chern marker for y = {y}")
-                chern_markers[x - x_start, y - y_start] = self.compute_invariant(epsilonT, kappa, x, y, steps_per_segment, vdT, rotation_angle, a, b, phi1_ex, phi2_ex, delta, initialise, fully_disorder)
-        
-        if plot:
-            plt.figure(figsize=(10, 8))
-            
-            # Define the extent to properly center the plaquettes
-            x_extent = [x_start - 0.5, x_end - 0.5]
-            y_extent = [y_start - 0.5, y_end - 0.5]
-            
-            im = plt.imshow(chern_markers.cpu().numpy(), cmap='viridis', origin='lower', 
-                            extent=x_extent + y_extent)
-            plt.colorbar(im, label='Chern Marker')
-            plt.title('Chern Marker')
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            
-            # Create fewer ticks (e.g., every 5 positions)
-            x_ticks = np.arange(x_start, x_end, 5)
-            y_ticks = np.arange(y_start, y_end, 5)
-            plt.xticks(x_ticks)
-            plt.yticks(y_ticks)
-            
-            # Draw lines to indicate the system boundaries (adjusted by -0.5 to align with plaquette boundaries)
-            plt.axvline(x=-0.5, color='r', linestyle='--')
-            plt.axvline(x=self.nx-0.5, color='r', linestyle='--')
-            plt.axhline(y=-0.5, color='r', linestyle='--')
-            plt.axhline(y=self.ny-0.5, color='r', linestyle='--')
-            
-            if save_path:
-                plt.savefig(save_path)
-            plt.show()
-        return chern_markers
-    
-    ## Parallel Computing of the local Chern Marker using the GPU
-    def central_lattice(self, num=4):
-        """
-        Returns the start and end coordinates defining a num × num central region of the lattice.
-        
-        Parameters:
-        num (int): Size of the central grid to select (default: 4)
-        
-        Returns:
-        tuple: (x_start, x_end, y_start, y_end) defining the central region
-        """
-        # Calculate the starting and ending positions for the central grid
-        x_start = (self.nx - num) // 2
-        x_end = x_start + num
-        y_start = (self.ny - num) // 2
-        y_end = y_start + num
-        
-        return (x_start, x_end, y_start, y_end)
-    
-    def spectral_localizer_para(self, epsilonT, kappa, steps_per_segment, vdT, rotation_angle=torch.pi/4, num=6, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
-        """
-        Parallel computation of spectral localizer for multiple sites in the central region.
-        
-        Parameters:
-        epsilonT: Branch cut parameter
-        kappa: Scaling factor
-        steps_per_segment: Number of steps per segment
-        vdT: Disorder/driving strength
-        num: Size of central region to compute (num x num sites)
-        Other parameters: Same as spectral_localizer
-        
-        Returns:
-        torch.Tensor: 4D tensor of spectral localizers, shape (num, num, L_size, L_size)
-        """
-        # Get central lattice bounds
-        x_start, x_end, y_start, y_end = self.central_lattice(num)
-        
-        # Calculate size of spectral localizer matrix
-        L_size = 2 * self.nx * self.ny  # Doubled due to Pauli matrices
-        
-        # Initialize output tensor
-        L_all = torch.zeros((num, num, L_size, L_size), dtype=torch.complex128, device=self.device)
-        
-        # Compute spectral localizers for all points in the central region
-        for i, x in enumerate(range(x_start, x_end)):
-            for j, y in enumerate(range(y_start, y_end)):
-                # Use existing spectral_localizer function
-                L_all[i, j] = self.spectral_localizer(
-                    epsilonT=epsilonT,
-                    kappa=kappa,
-                    x=x, y=y,
-                    steps_per_segment=steps_per_segment,
-                    vdT=vdT,
-                    rotation_angle=rotation_angle,
-                    a=a, b=b,
-                    phi1_ex=phi1_ex,
-                    phi2_ex=phi2_ex,
-                    delta=delta,
-                    initialise=initialise,
-                    fully_disorder=fully_disorder
-                )
-                
-                # Optional: Clear cache periodically
-                if (i * num + j) % 10 == 0:
-                    torch.cuda.empty_cache()
-        
-        return L_all
-    
-    def chern_marker_averg(self, epsilonT, kappa, steps_per_segment, vdT, num=6, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
-        """
-        Compute the average Chern marker for a central region of the lattice.
-        
-        Parameters:
-        epsilonT: Branch cut parameter
-        kappa: Scaling factor
-        steps_per_segment: Number of steps per segment
-        vdT: Disorder strength
-        num: Size of central region to compute (num x num sites)
-        Other parameters: Same as compute_invariant
-        
-        Returns:
-        float: Average Chern marker for the central region
-        """
-        # Compute the spectral localizers for the central region
-        L_all = self.spectral_localizer_para(
-            epsilonT=epsilonT,
-            kappa=kappa,
-            steps_per_segment=steps_per_segment,
-            vdT=vdT,
-            rotation_angle=rotation_angle,
-            num=num,
-            a=a, b=b,
-            phi1_ex=phi1_ex,
-            phi2_ex=phi2_ex,
-            delta=delta,
-            initialise=initialise,
-            fully_disorder=fully_disorder
-        )
-        
-        # Compute the Chern markers for each localizer
-        signature = self.compute_signature(L_all)
-        
-        chern_markers = 0.5 * signature
-        
-        # Compute the average
-        chern_average = torch.mean(chern_markers)
-        
-        # Optional: Clear GPU memory
-        del L_all
-        torch.cuda.empty_cache()
-        
-        return chern_average.item()

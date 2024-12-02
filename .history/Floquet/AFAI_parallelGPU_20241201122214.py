@@ -3844,10 +3844,9 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         # Handle batch case
         elif L.dim() == 4:
-            # Compute signatures for all matrices at once, keeping float type
-            signatures = (torch.sum(eigenvalues > 0, dim=-1, dtype=torch.float64) - 
-                        torch.sum(eigenvalues < 0, dim=-1, dtype=torch.float64))
-            return signatures
+            # Compute signatures for all matrices at once
+            signatures = torch.sum(eigenvalues > 0, dim=-1) - torch.sum(eigenvalues < 0, dim=-1)
+            return signatures.to(torch.int)
         
         else:
             raise ValueError(f"Input tensor must be 2D or 4D, got {L.dim()}D")
@@ -4035,7 +4034,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         epsilonT: Branch cut parameter
         kappa: Scaling factor
         steps_per_segment: Number of steps per segment
-        vdT: Disorder strength
+        vdT: Disorder/driving strength
         num: Size of central region to compute (num x num sites)
         Other parameters: Same as compute_invariant
         
@@ -4059,15 +4058,9 @@ class tb_floquet_tbc_cuda(nn.Module):
         )
         
         # Compute the Chern markers for each localizer
-        signature = self.compute_signature(L_all)
+        chern_markers = self.compute_signature(L_all)
         
-        chern_markers = 0.5 * signature
+        # Compute the average Chern marker
+        avg_chern_marker = torch.mean(chern_markers)
         
-        # Compute the average
-        chern_average = torch.mean(chern_markers)
-        
-        # Optional: Clear GPU memory
-        del L_all
-        torch.cuda.empty_cache()
-        
-        return chern_average.item()
+        return avg_chern_marker

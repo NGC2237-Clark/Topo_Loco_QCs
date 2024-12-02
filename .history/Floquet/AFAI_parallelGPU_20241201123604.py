@@ -3844,9 +3844,8 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         # Handle batch case
         elif L.dim() == 4:
-            # Compute signatures for all matrices at once, keeping float type
-            signatures = (torch.sum(eigenvalues > 0, dim=-1, dtype=torch.float64) - 
-                        torch.sum(eigenvalues < 0, dim=-1, dtype=torch.float64))
+            # Compute signatures for all matrices at once
+            signatures = torch.sum(eigenvalues > 0, dim=-1) - torch.sum(eigenvalues < 0, dim=-1)
             return signatures
         
         else:
@@ -4059,9 +4058,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         )
         
         # Compute the Chern markers for each localizer
-        signature = self.compute_signature(L_all)
-        
-        chern_markers = 0.5 * signature
+        chern_markers = self.compute_signature(L_all)
         
         # Compute the average
         chern_average = torch.mean(chern_markers)

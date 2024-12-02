@@ -3844,10 +3844,9 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         # Handle batch case
         elif L.dim() == 4:
-            # Compute signatures for all matrices at once, keeping float type
-            signatures = (torch.sum(eigenvalues > 0, dim=-1, dtype=torch.float64) - 
-                        torch.sum(eigenvalues < 0, dim=-1, dtype=torch.float64))
-            return signatures
+            # Compute signatures for all matrices at once
+            signatures = torch.sum(eigenvalues > 0, dim=-1) - torch.sum(eigenvalues < 0, dim=-1)
+            return signatures.to(torch.int)
         
         else:
             raise ValueError(f"Input tensor must be 2D or 4D, got {L.dim()}D")
@@ -4027,47 +4026,4 @@ class tb_floquet_tbc_cuda(nn.Module):
         
         return L_all
     
-    def chern_marker_averg(self, epsilonT, kappa, steps_per_segment, vdT, num=6, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):
-        """
-        Compute the average Chern marker for a central region of the lattice.
-        
-        Parameters:
-        epsilonT: Branch cut parameter
-        kappa: Scaling factor
-        steps_per_segment: Number of steps per segment
-        vdT: Disorder strength
-        num: Size of central region to compute (num x num sites)
-        Other parameters: Same as compute_invariant
-        
-        Returns:
-        float: Average Chern marker for the central region
-        """
-        # Compute the spectral localizers for the central region
-        L_all = self.spectral_localizer_para(
-            epsilonT=epsilonT,
-            kappa=kappa,
-            steps_per_segment=steps_per_segment,
-            vdT=vdT,
-            rotation_angle=rotation_angle,
-            num=num,
-            a=a, b=b,
-            phi1_ex=phi1_ex,
-            phi2_ex=phi2_ex,
-            delta=delta,
-            initialise=initialise,
-            fully_disorder=fully_disorder
-        )
-        
-        # Compute the Chern markers for each localizer
-        signature = self.compute_signature(L_all)
-        
-        chern_markers = 0.5 * signature
-        
-        # Compute the average
-        chern_average = torch.mean(chern_markers)
-        
-        # Optional: Clear GPU memory
-        del L_all
-        torch.cuda.empty_cache()
-        
-        return chern_average.item()
+    def chern_marker_averg(self, epsilonT, kappa, steps_per_segment, vdT, num=4, rotation_angle=torch.pi/4, a=0, b=0, phi1_ex=0, phi2_ex=0, delta=None, initialise=False, fully_disorder=True):

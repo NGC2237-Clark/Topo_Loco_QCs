@@ -4061,8 +4061,7 @@ class tb_floquet_tbc_cuda(nn.Module):
         # Compute the Chern markers for each localizer
         signature = self.compute_signature(L_all)
         
-        chern_markers = 0.5 * signature
-        
+        chern_markers 
         # Compute the average
         chern_average = torch.mean(chern_markers)
         
